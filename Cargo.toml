@@ -1,0 +1,125 @@
+[package]
+name = "spotdl"
+version = "0.2.0"
+edition = "2024"
+description = "Download songs, albums, playlists and artists from Spotify"
+license = "MIT"
+readme = "README.md"
+default-run = "spotdl"
+
+[features]
+default = ["gui"]
+# The desktop app (`spotdl-gui`). Build with `--no-default-features` for the CLI alone.
+gui = [
+    "dep:ksni",
+    "dep:rfd",
+    "dep:serde",
+    "dep:slint",
+    "dep:slint-build",
+    "dep:tray-icon",
+    "dep:zune-core",
+    "dep:zune-jpeg",
+]
+
+[[bin]]
+name = "spotdl"
+path = "src/main.rs"
+
+[[bin]]
+name = "spotdl-gui"
+path = "src/gui/main.rs"
+required-features = ["gui"]
+
+[dependencies]
+# Spotify's audio encryption (AES-128-CTR), at the versions librespot-audio uses
+aes = "0.8.4"
+anyhow = "1.0.103"
+clap = { version = "4.6.1", features = ["derive", "env", "wrap_help"] }
+console = "0.16"
+ctr = "0.9.2"
+dirs = "6"
+env_logger = "0.11.11"
+futures-util = "0.3"
+http = "1"
+indicatif = "0.18"
+librespot-core = "0.8.0"
+librespot-metadata = "0.8.0"
+librespot-protocol = "0.8.0"
+lofty = "0.25"
+log = "0.4.33"
+# the browser login's protocol (PKCE, state, token request), as librespot uses it
+oauth2 = { version = "5.0.0", default-features = false, features = ["reqwest"] }
+# opens the login page in the default browser
+open = "5.4.0"
+protobuf = "3.7"
+# 0.12 + native-tls is the same build librespot-oauth already pulls in.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+# the desktop app's folder picker (the system's own dialog, via the XDG portal on Linux)
+rfd = { version = "0.18", optional = true }
+# the desktop app's saved Downloads list
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = "1"
+slint = { version = "1.18.1", optional = true, default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+] }
+# decodes search result thumbnails in the desktop app
+zune-core = { version = "0.5.3", optional = true }
+zune-jpeg = { version = "0.5.15", optional = true }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "process", "io-util", "fs", "signal", "sync", "time"] }
+
+# librespot-core's build script breaks with newer vergen releases; keep these pinned.
+# (cargo reports vergen-gitcl as unused: it's only here to constrain the version.)
+vergen = "=9.0.6"
+vergen-gitcl = "=1.0.8"
+vergen-lib = "=0.1.6"
+
+# The desktop app's tray icon: StatusNotifierItem over D-Bus, which KDE shows (and GNOME
+# with the AppIndicator extension). async-io matches the D-Bus setup Slint already uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", optional = true, default-features = false, features = ["async-io", "blocking"] }
+
+# glibc's allocator settings (see `spotdl::tune_allocator`)
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2.186"
+
+# free space on the download drive, and a plain fsync where macOS can't do a full one
+# (see `spotdl::output`)
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
+
+# free space on the download drive, and keeping the PC awake while downloading (see
+# `spotdl::output` and `spotdl::awake`); the version and API set the tree already has
+[target.'cfg(windows)'.dependencies]
+# the desktop app's notification-area icon; 0.24 is the release whose menus (muda 0.19)
+# are the ones Slint already uses
+tray-icon = { version = "0.24.2", optional = true, default-features = false }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Power",
+] }
+
+# keeps the Mac awake, and out of App Nap, while downloading (see `spotdl::awake`)
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSProcessInfo",
+    "NSString",
+] }
+
+[dev-dependencies]
+# only to check our in-place decryption against librespot's
+librespot-audio = "0.8.0"
+
+[build-dependencies]
+slint-build = { version = "1.18.1", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1

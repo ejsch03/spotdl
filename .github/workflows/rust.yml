@@ -1,0 +1,124 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install ffmpeg (format conversion test) and fontconfig (desktop app)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y ffmpeg libfontconfig1-dev
+    - name: Install ffmpeg (format conversion test)
+      if: runner.os == 'macOS'
+      run: brew install ffmpeg
+    - name: Install ffmpeg (format conversion test)
+      if: runner.os == 'Windows'
+      run: choco install ffmpeg -y --no-progress
+    - name: Check the Windows installer script parses
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors)
+        if ($errors) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
+    - name: Check formatting
+      run: cargo fmt --check
+    - name: Clippy
+      run: cargo clippy --all-targets -- -D warnings
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Build and test the command line alone
+      run: cargo test --no-default-features --verbose
+    - name: Check the programs carry their icon and version details
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+        foreach ($exe in 'spotdl.exe', 'spotdl-gui.exe') {
+          $info = (Get-Item "target\debug\$exe").VersionInfo
+          if ($info.FileDescription -ne 'spotdl' -or $info.ProductVersion -ne $version) {
+            throw "$exe lacks its resources: $($info | Format-List | Out-String)"
+          }
+        }
+    - name: Start the desktop app (this machine has no GPU, so it may need the software renderer)
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $config = Join-Path $env:RUNNER_TEMP 'spotdl-config'
+        $music = Join-Path $env:RUNNER_TEMP 'spotdl-music'
+        $log = Join-Path $env:RUNNER_TEMP 'spotdl-gui.log'
+        $env:RUST_LOG = 'spotdl=info,spotdl_gui=info'
+        Start-Process target\debug\spotdl-gui.exe -ArgumentList '--config-dir', $config, '-o', $music -RedirectStandardError $log
+        Start-Sleep -Seconds 20
+        $running = Get-Process spotdl-gui -ErrorAction SilentlyContinue
+        Get-Content $log
+        $running | Stop-Process -Force
+        if (-not $running) { throw 'the desktop app stopped (its log is above)' }
+        if (Select-String -Path $log -Pattern 'ran into a problem' -Quiet) { throw 'the desktop app reported a problem' }
+    - name: Build for Windows on ARM
+      if: runner.os == 'Windows'
+      run: |
+        rustup target add aarch64-pc-windows-msvc
+        cargo build --target aarch64-pc-windows-msvc --verbose
+
+  windows-installer:
+    # what people run to install spotdl on Windows, on a real Windows machine
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+    - uses: actions/checkout@v4
+    - name: Give the PATH an entry with a variable in it, which installing must leave alone
+      run: |
+        $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        Set-ItemProperty HKCU:\Environment -Name Path -Value "$path;%USERPROFILE%\spotdl-ci-marker" -Type ExpandString
+    - name: Install
+      run: powershell -ExecutionPolicy Bypass -File install.ps1
+    - name: Check what was installed
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = Join-Path $env:LOCALAPPDATA 'Programs\spotdl'
+        foreach ($file in 'spotdl.exe', 'spotdl-gui.exe', 'spotdl.ico') {
+          if (-not (Test-Path (Join-Path $dir $file))) { throw "$file wasn't installed" }
+        }
+        & (Join-Path $dir 'spotdl.exe') --version
+        if ($LASTEXITCODE -ne 0) { throw 'the installed spotdl.exe failed' }
+        $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'spotdl.lnk'
+        if (-not (Test-Path $shortcut)) { throw 'no Start menu entry' }
+        $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+        if ($link.TargetPath -ne (Join-Path $dir 'spotdl-gui.exe')) { throw "the Start menu entry opens $($link.TargetPath)" }
+        if ($link.IconLocation -notlike '*spotdl.ico*') { throw "the Start menu entry's icon is $($link.IconLocation)" }
+        $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        if (($path -split ';') -notcontains $dir) { throw "$dir isn't on the PATH: $path" }
+        if ($path -notlike '*%USERPROFILE%\spotdl-ci-marker*') { throw "the PATH lost its variables: $path" }
+    - name: Install again over the top (an update)
+      run: powershell -ExecutionPolicy Bypass -File install.ps1
+    - name: Uninstall
+      run: powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+    - name: Check it's all gone, and the rest of the PATH isn't
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = Join-Path $env:LOCALAPPDATA 'Programs\spotdl'
+        if (Test-Path $dir) { throw "$dir is still there" }
+        if (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'spotdl.lnk')) { throw 'the Start menu entry is still there' }
+        $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        if (($path -split ';') -contains $dir) { throw "$dir is still on the PATH: $path" }
+        if ($path -notlike '*%USERPROFILE%\spotdl-ci-marker*') { throw "uninstalling took other PATH entries: $path" }

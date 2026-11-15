@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The desktop app's bundle on macOS. install.sh fills in the version. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>spotdl</string>
+	<key>CFBundleExecutable</key>
+	<string>spotdl-gui</string>
+	<key>CFBundleIconFile</key>
+	<string>spotdl</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.spotdl</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>spotdl</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.12</string>
+	<!-- sharp text on Retina screens -->
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- lets Macs with two GPUs stay on the power-saving one -->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

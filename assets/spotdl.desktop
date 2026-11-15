@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=spotdl
+GenericName=Music Downloader
+Comment=Search Spotify and download songs, albums and playlists
+# install.sh fills in where the program is
+Exec=@BINDIR@/spotdl-gui %U
+Icon=spotdl
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=spotify;music;download;playlist;album;
+StartupNotify=true
+StartupWMClass=spotdl
+SingleMainWindow=true
