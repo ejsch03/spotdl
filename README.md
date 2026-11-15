@@ -294,6 +294,18 @@ Everything works the same on Windows. A few things are worth knowing:
   sight.
 - **Windows on ARM** works the same: on an ARM computer, rustup sets up the ARM toolchain,
   and `install.ps1` builds for it.
+- **Copying the programs.** `spotdl-gui.exe` and `spotdl.exe` each run on their own: copy
+  one to another Windows 10 or 11 PC and it works without installing anything (except
+  ffmpeg, for FLAC, MP3 or Opus). The login and settings aren't in the `.exe`; they stay in
+  `%APPDATA%\spotdl` on the PC they were made on.
+- **"Windows protected your PC".** spotdl isn't signed, so SmartScreen stops a copy that came
+  from the internet (a download, a chat app, an email). Choose **More info** → **Run
+  anyway**, or unblock the file once: right-click it → **Properties** → tick **Unblock** →
+  **OK** (or `Unblock-File .\spotdl-gui.exe` in PowerShell). Unblock a `.zip` before
+  extracting it, or what's in it stays blocked. A copy you built yourself is never stopped.
+  Smart App Control, on some Windows 11 PCs, blocks unsigned programs outright: there's no
+  way to run them anyway short of turning it off (Windows Security → App & browser
+  control), which on many PCs can't be undone without resetting Windows.
 - **Sleep.** While it's downloading, spotdl keeps Windows from going to sleep when idle (the
   screen can still turn off). Once the queue is done or paused, it can sleep as usual.
 - **When the drive isn't connected** (say, an external `E:` drive), or it's full or

@@ -1,0 +1,5 @@
+# The Windows programs carry the C runtime (vcruntime140.dll) inside them rather than
+# needing the Visual C++ Redistributable, so spotdl.exe and spotdl-gui.exe each run on their
+# own on any Windows 10 or 11 PC. (A RUSTFLAGS environment variable replaces this.)
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

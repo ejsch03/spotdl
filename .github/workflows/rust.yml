@@ -46,7 +46,7 @@ jobs:
       run: cargo test --verbose
     - name: Build and test the command line alone
       run: cargo test --no-default-features --verbose
-    - name: Check the programs carry their icon and version details
+    - name: Check the programs carry their icon, version details and C runtime
       if: runner.os == 'Windows'
       shell: powershell
       run: |
@@ -55,6 +55,10 @@ jobs:
           $info = (Get-Item "target\debug\$exe").VersionInfo
           if ($info.FileDescription -ne 'spotdl' -or $info.ProductVersion -ne $version) {
             throw "$exe lacks its resources: $($info | Format-List | Out-String)"
+          }
+          # it runs without the Visual C++ Redistributable (see .cargo/config.toml)
+          if (Select-String -Path "target\debug\$exe" -Pattern 'vcruntime140.dll' -SimpleMatch -Quiet) {
+            throw "$exe needs vcruntime140.dll"
           }
         }
     - name: Start the desktop app (this machine has no GPU, so it may need the software renderer)
