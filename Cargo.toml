@@ -11,12 +11,14 @@ default-run = "spotdl"
 default = ["gui"]
 # The desktop app (`spotdl-gui`). Build with `--no-default-features` for the CLI alone.
 gui = [
+    "dep:async-io",
     "dep:ksni",
     "dep:rfd",
     "dep:serde",
     "dep:slint",
     "dep:slint-build",
     "dep:tray-icon",
+    "dep:zbus",
     "dep:zune-core",
     "dep:zune-jpeg",
 ]
@@ -81,6 +83,10 @@ vergen-lib = "=0.1.6"
 # with the AppIndicator extension). async-io matches the D-Bus setup Slint already uses.
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.7", optional = true, default-features = false, features = ["async-io", "blocking"] }
+# the desktop app asks the XDG desktop portal whether the desktop is in dark mode when it
+# starts; the D-Bus setup Slint and ksni already use
+async-io = { version = "2.6.0", optional = true }
+zbus = { version = "5.19.0", optional = true, default-features = false, features = ["async-io"] }
 
 # glibc's allocator settings (see `spotdl::tune_allocator`)
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
@@ -91,8 +97,9 @@ libc = "0.2.186"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
 
-# free space on the download drive, and keeping the PC awake while downloading (see
-# `spotdl::output` and `spotdl::awake`); the version and API set the tree already has
+# free space on the download drive, keeping the PC awake while downloading (see
+# `spotdl::output` and `spotdl::awake`), and the light or dark app mode the desktop app
+# starts in; the version and API set the tree already has
 [target.'cfg(windows)'.dependencies]
 # the desktop app's notification-area icon; 0.24 is the release whose menus (muda 0.19)
 # are the ones Slint already uses
@@ -101,9 +108,11 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Power",
+    "Win32_System_Registry",
 ] }
 
-# keeps the Mac awake, and out of App Nap, while downloading (see `spotdl::awake`)
+# keeps the Mac awake, and out of App Nap, while downloading (see `spotdl::awake`), and
+# tells the desktop app whether the Mac is in dark mode when it starts
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
@@ -111,6 +120,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "block2",
     "NSProcessInfo",
     "NSString",
+    "NSUserDefaults",
 ] }
 
 [dev-dependencies]

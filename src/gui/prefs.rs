@@ -1,8 +1,9 @@
 //! The desktop app's settings file, `gui.json` in the config directory. It keeps what's
-//! chosen in the window (the download folder and the format) for the next time, e.g.
+//! chosen in the window (the download folder, the format and the theme) for the next
+//! time, e.g.
 //!
 //! ```json
-//! { "output": "/home/me/Music", "format": "ogg" }
+//! { "output": "/home/me/Music", "format": "ogg", "theme": "nord" }
 //! ```
 //!
 //! Other keys in the file are left alone, so it's safe to edit by hand.
@@ -58,6 +59,11 @@ impl Prefs {
         Format::from_str(self.values.get("format")?.as_str()?, true).ok()
     }
 
+    /// The theme's id, as saved (`Theme::find` looks it up).
+    pub fn theme(&self) -> Option<&str> {
+        self.values.get("theme").and_then(Value::as_str)
+    }
+
     /// Remembers the download folder; an empty one means the default again.
     pub fn set_output(&mut self, dir: &str) {
         match dir.trim() {
@@ -71,6 +77,10 @@ impl Prefs {
             self.values
                 .insert("format".into(), name.get_name().to_string().into());
         }
+    }
+
+    pub fn set_theme(&mut self, id: &str) {
+        self.values.insert("theme".into(), id.into());
     }
 
     /// Writes the file, replacing the old one in one step so it's never half-written.
@@ -92,36 +102,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remembers_folder_and_format() {
+    fn remembers_folder_format_and_theme() {
         let dir = std::env::temp_dir().join(format!("spotdl-prefs-{}", std::process::id()));
         _ = std::fs::remove_dir_all(&dir);
 
         let mut prefs = Prefs::load(&dir);
         assert_eq!(
-            (prefs.output(), prefs.format()),
-            (None, None),
+            (prefs.output(), prefs.format(), prefs.theme()),
+            (None, None, None),
             "nothing saved yet"
         );
         prefs.set_output("  ~/Music/Spotify ");
         prefs.set_format(Format::Opus);
+        prefs.set_theme("nord");
         prefs.save().unwrap();
 
         let prefs = Prefs::load(&dir);
         assert_eq!(prefs.output(), Some("~/Music/Spotify"));
         assert_eq!(prefs.format(), Some(Format::Opus));
+        assert_eq!(prefs.theme(), Some("nord"));
 
         // keys it doesn't know survive; bad values are ignored
         std::fs::write(
             dir.join(FILE),
-            r#"{ "output": "", "format": "wav", "theme": "dark" }"#,
+            r#"{ "output": "", "format": "wav", "theme": 3, "window": "maximized" }"#,
         )
         .unwrap();
         let mut prefs = Prefs::load(&dir);
-        assert_eq!((prefs.output(), prefs.format()), (None, None));
+        assert_eq!(
+            (prefs.output(), prefs.format(), prefs.theme()),
+            (None, None, None)
+        );
         prefs.set_format(Format::Flac);
         prefs.save().unwrap();
         let saved = std::fs::read_to_string(dir.join(FILE)).unwrap();
-        assert!(saved.contains(r#""theme": "dark""#) && saved.contains(r#""format": "flac""#));
+        assert!(
+            saved.contains(r#""window": "maximized""#) && saved.contains(r#""format": "flac""#)
+        );
 
         // a broken file doesn't stop the app
         std::fs::write(dir.join(FILE), "{ not json").unwrap();

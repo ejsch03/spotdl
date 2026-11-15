@@ -1,7 +1,11 @@
 // spotdl's desktop window. The Rust side (src/gui/main.rs) owns all state and logic;
 // this file only lays it out and forwards clicks.
 
-import { Button, LineEdit, ComboBox, ListView, ProgressIndicator, Spinner, Palette } from "std-widgets.slint";
+import { ListView, Palette } from "std-widgets.slint";
+import { Theme, ThemeColors, Button, LineEdit, ComboBox, ProgressIndicator, Spinner } from "widgets.slint";
+
+// for the Rust side, which sets the theme
+export { Theme, ThemeColors }
 
 export enum JobState { queued, active, done, failed }
 
@@ -28,13 +32,6 @@ export struct JobRow {
     state: JobState,
 }
 
-global Theme {
-    out property <color> dim: Palette.foreground.with-alpha(0.62);
-    out property <color> faint: Palette.foreground.with-alpha(0.07);
-    out property <color> good: #3fb950;
-    out property <color> bad: #f85149;
-}
-
 component Chip inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
@@ -44,15 +41,15 @@ component Chip inherits Rectangle {
     width: label.preferred-width + 28px;
     border-radius: self.height / 2;
     border-width: root.selected ? 0px : 1px;
-    border-color: Palette.border;
-    background: root.selected ? Palette.accent-background : touch.has-hover ? Theme.faint : transparent;
+    border-color: Theme.border;
+    background: root.selected ? Theme.accent : touch.has-hover ? Theme.faint : transparent;
 
     label := Text {
         width: 100%;
         height: 100%;
         text: root.text;
         font-size: 13px;
-        color: root.selected ? Palette.accent-foreground : Palette.foreground;
+        color: root.selected ? Theme.accent-foreground : Theme.foreground;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -82,7 +79,7 @@ component Thumbnail inherits Rectangle {
         text: root.initial;
         font-size: 18px;
         font-weight: 600;
-        color: Theme.dim;
+        color: Theme.muted;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -125,6 +122,7 @@ component ResultItem inherits Rectangle {
             horizontal-stretch: 1;
             Text {
                 text: root.hit.title;
+                color: Theme.foreground;
                 font-size: 14px;
                 font-weight: 600;
                 overflow: elide;
@@ -133,7 +131,7 @@ component ResultItem inherits Rectangle {
             Text {
                 text: root.hit.subtitle;
                 font-size: 12px;
-                color: Theme.dim;
+                color: Theme.muted;
                 overflow: elide;
             }
         }
@@ -141,7 +139,7 @@ component ResultItem inherits Rectangle {
         Text {
             text: root.hit.detail;
             font-size: 12px;
-            color: Theme.dim;
+            color: Theme.muted;
             vertical-alignment: center;
         }
 
@@ -175,6 +173,7 @@ component JobItem inherits Rectangle {
             spacing: 8px;
             Text {
                 text: root.job.title;
+                color: Theme.foreground;
                 font-size: 13px;
                 font-weight: 600;
                 overflow: elide;
@@ -198,7 +197,7 @@ component JobItem inherits Rectangle {
             text: root.job.status;
             font-size: 12px;
             overflow: elide;
-            color: root.job.state == JobState.failed ? Theme.bad : root.job.state == JobState.done ? Theme.good : Theme.dim;
+            color: root.job.state == JobState.failed ? Theme.bad : root.job.state == JobState.done ? Theme.good : Theme.muted;
         }
 
         if root.job.detail != "": Text {
@@ -218,7 +217,7 @@ export component AppWindow inherits Window {
     preferred-height: 700px;
     min-width: 760px;
     min-height: 480px;
-    background: Palette.background;
+    background: Theme.background;
 
     // logging in
     in property <bool> logged-in;
@@ -261,6 +260,19 @@ export component AppWindow inherits Window {
     in property <bool> app-status-bad;
     // SPOTDL_CLIENT_ID and SPOTDL_CLIENT_SECRET are set, and win at startup
     in property <bool> app-from-environment;
+    // Settings: the themes' names, and which one is showing
+    in property <[string]> theme-names;
+    in-out property <int> theme-index;
+
+    // Slint still draws the scroll bars and menus itself; they go light or dark with the
+    // theme rather than with the system
+    property <bool> dark-theme: Theme.dark;
+    init => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dark-theme => {
+        Palette.color-scheme = self.dark-theme ? ColorScheme.dark : ColorScheme.light;
+    }
 
     callback log-in();
     callback reconnect();
@@ -285,6 +297,8 @@ export component AppWindow inherits Window {
     // typing in the folder box (the app waits for a pause before acting on it)
     callback output-dir-edited();
     callback format-changed();
+    // a theme was chosen in Settings, by its place in theme-names
+    callback theme-changed(int);
     // invoked from Rust when a job ends, so the Rust side can update the results
     callback job-finished(int);
 
@@ -302,6 +316,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: "spotdl";
+                    color: Theme.foreground;
                     font-size: 28px;
                     font-weight: 700;
                     horizontal-alignment: center;
@@ -309,7 +324,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: root.login-url != "" ? "Log in to Spotify in your browser. spotdl carries on by itself once you're done." : root.busy-connecting ? "Connecting to Spotify…" : "Log in with your Spotify Premium account. Your browser opens once, and the login is remembered.";
-                    color: Theme.dim;
+                    color: Theme.muted;
                     wrap: word-wrap;
                     horizontal-alignment: center;
                 }
@@ -317,7 +332,6 @@ export component AppWindow inherits Window {
                 if root.busy-connecting: HorizontalLayout {
                     alignment: center;
                     Spinner {
-                        indeterminate: true;
                         width: 32px;
                         height: 32px;
                     }
@@ -371,7 +385,7 @@ export component AppWindow inherits Window {
                     Text {
                         text: "Using a browser on another computer? Open this link there:";
                         font-size: 12px;
-                        color: Theme.dim;
+                        color: Theme.muted;
                         wrap: word-wrap;
                     }
 
@@ -383,7 +397,7 @@ export component AppWindow inherits Window {
                     Text {
                         text: "When the login ends on a page that doesn't load, copy that page's address and paste it here:";
                         font-size: 12px;
-                        color: Theme.dim;
+                        color: Theme.muted;
                         wrap: word-wrap;
                     }
 
@@ -426,6 +440,7 @@ export component AppWindow inherits Window {
                 padding: 10px;
                 Text {
                     text: root.banner;
+                    color: Theme.foreground;
                     wrap: word-wrap;
                 }
             }
@@ -481,7 +496,7 @@ export component AppWindow inherits Window {
             Text {
                 text: root.results.length > 0 ? root.search-status : "";
                 font-size: 12px;
-                color: Theme.dim;
+                color: Theme.muted;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -496,7 +511,7 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 border-radius: 8px;
                 border-width: 1px;
-                border-color: Palette.border;
+                border-color: Theme.border;
 
                 ListView {
                     for row[i] in root.results: ResultItem {
@@ -515,7 +530,6 @@ export component AppWindow inherits Window {
                     if root.searching: HorizontalLayout {
                         alignment: center;
                         Spinner {
-                            indeterminate: true;
                             width: 28px;
                             height: 28px;
                         }
@@ -523,7 +537,7 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: root.search-status;
-                        color: Theme.dim;
+                        color: Theme.muted;
                         wrap: word-wrap;
                         horizontal-alignment: center;
                     }
@@ -539,6 +553,7 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: root.paused ? "Downloads · Paused" : "Downloads";
+                        color: Theme.foreground;
                         font-size: 15px;
                         font-weight: 600;
                         vertical-alignment: center;
@@ -594,7 +609,7 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                     border-radius: 8px;
                     border-width: 1px;
-                    border-color: Palette.border;
+                    border-color: Theme.border;
 
                     ListView {
                         for job in root.jobs: VerticalLayout {
@@ -612,7 +627,7 @@ export component AppWindow inherits Window {
                         width: 100%;
                         height: 100%;
                         text: "Nothing queued yet.\nPick something on the left.";
-                        color: Theme.dim;
+                        color: Theme.muted;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -625,6 +640,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: "Save to";
+                color: Theme.foreground;
                 vertical-alignment: center;
             }
 
@@ -653,6 +669,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: "Format";
+                color: Theme.foreground;
                 vertical-alignment: center;
             }
 
@@ -668,7 +685,7 @@ export component AppWindow inherits Window {
             Text {
                 text: root.account;
                 font-size: 12px;
-                color: Theme.dim;
+                color: Theme.muted;
                 vertical-alignment: center;
                 // shortened with … rather than cut off when the window is narrow
                 overflow: elide;
@@ -695,28 +712,51 @@ export component AppWindow inherits Window {
                     width: min(620px, root.width - 40px);
                     border-radius: 10px;
                     border-width: 1px;
-                    border-color: Palette.border;
-                    background: Palette.background;
+                    border-color: Theme.border;
+                    background: Theme.background;
 
                     VerticalLayout {
                         padding: 22px;
                         spacing: 12px;
 
-                        Text {
-                            text: "Settings";
-                            font-size: 20px;
-                            font-weight: 700;
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            Text {
+                                text: "Settings";
+                                color: Theme.foreground;
+                                font-size: 20px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+
+                            Text {
+                                text: "Theme";
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                            }
+
+                            ComboBox {
+                                width: 200px;
+                                model: root.theme-names;
+                                current-index <=> root.theme-index;
+                                selected => {
+                                    root.theme-changed(self.current-index);
+                                }
+                            }
                         }
 
                         Text {
                             text: "Search albums, artists and playlists";
+                            color: Theme.foreground;
                             font-size: 15px;
                             font-weight: 600;
                         }
 
                         Text {
                             text: "Out of the box, search finds songs, and the albums and artists they're on. To search albums, artists and playlists directly, spotdl needs a Spotify developer app of your own. It's free and takes a couple of minutes:";
-                            color: Theme.dim;
+                            color: Theme.muted;
                             wrap: word-wrap;
                         }
 
@@ -724,6 +764,7 @@ export component AppWindow inherits Window {
                             spacing: 10px;
                             Text {
                                 text: "1. Open Spotify's developer dashboard, and log in with your Spotify account if it asks.";
+                                color: Theme.foreground;
                                 wrap: word-wrap;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
@@ -742,11 +783,13 @@ export component AppWindow inherits Window {
 
                         Text {
                             text: "2. Choose Create app. Any name and description will do. For the redirect URI, enter http://127.0.0.1:8888/callback (spotdl doesn't use it). Tick Web API, accept the terms, and save.";
+                            color: Theme.foreground;
                             wrap: word-wrap;
                         }
 
                         Text {
                             text: "3. In the app's settings, copy its Client ID and its Client secret (under View client secret) into the boxes below.";
+                            color: Theme.foreground;
                             wrap: word-wrap;
                         }
 
@@ -755,6 +798,7 @@ export component AppWindow inherits Window {
                             Row {
                                 Text {
                                     text: "Client ID";
+                                    color: Theme.foreground;
                                     vertical-alignment: center;
                                 }
 
@@ -767,6 +811,7 @@ export component AppWindow inherits Window {
                             Row {
                                 Text {
                                     text: "Client secret";
+                                    color: Theme.foreground;
                                     vertical-alignment: center;
                                 }
 
@@ -783,14 +828,14 @@ export component AppWindow inherits Window {
 
                         if root.app-status != "": Text {
                             text: root.app-status;
-                            color: root.app-checking ? Theme.dim : root.app-status-bad ? Theme.bad : Theme.good;
+                            color: root.app-checking ? Theme.muted : root.app-status-bad ? Theme.bad : Theme.good;
                             wrap: word-wrap;
                         }
 
                         if root.app-from-environment: Text {
                             text: "SPOTDL_CLIENT_ID and SPOTDL_CLIENT_SECRET are set, so when spotdl starts it uses those rather than what's saved here.";
                             font-size: 12px;
-                            color: Theme.dim;
+                            color: Theme.muted;
                             wrap: word-wrap;
                         }
 
@@ -812,7 +857,6 @@ export component AppWindow inherits Window {
                             if root.app-checking: VerticalLayout {
                                 alignment: center;
                                 Spinner {
-                                    indeterminate: true;
                                     width: 20px;
                                     height: 20px;
                                 }

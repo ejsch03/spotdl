@@ -10,6 +10,7 @@
 mod instance;
 mod prefs;
 mod saved_queue;
+mod theme;
 mod tray;
 
 use std::cell::RefCell;
@@ -141,6 +142,9 @@ fn run() -> Result<()> {
         instance::Claim::Forwarded => return Ok(()),
         instance::Claim::First(listener) => listener,
     };
+    // the saved theme (GitHub's to begin with), in the light or dark half of its pair that
+    // matches the system as it's set now
+    let theme = theme::Theme::at_launch(prefs.theme(), theme::system_prefers_dark());
     // a broken developer app setup shouldn't stop the app; search falls back to songs
     let (web, web_problem) = match search::WebApi::load(auth.dir()) {
         Ok(web) => (web.map(Arc::new), None),
@@ -186,7 +190,7 @@ fn run() -> Result<()> {
         jobs: Rc::new(VecModel::default()),
         state: RefCell::default(),
     });
-    app.init(&window, &settings);
+    app.init(&window, &settings, theme);
     app.restore_queue(SavedQueue::load(app.auth.dir()), startup);
     let mut running = None;
     if let Some(launches) = launches {
@@ -297,7 +301,7 @@ struct App {
     tray_timer: Timer,
     /// The download options the app started with; the window picks folder and format.
     settings: Settings,
-    /// The folder and format chosen in the window, kept for next time.
+    /// The folder, format and theme chosen in the window, kept for next time.
     prefs: RefCell<Prefs>,
     /// Tells which results are already downloaded. Only one check runs at a time.
     checker: Arc<tokio::sync::Mutex<Option<Checker>>>,
@@ -368,7 +372,13 @@ struct JobSpec {
 }
 
 impl App {
-    fn init(self: &Rc<Self>, window: &AppWindow, settings: &Settings) {
+    fn init(self: &Rc<Self>, window: &AppWindow, settings: &Settings, theme: &theme::Theme) {
+        let names: Vec<slint::SharedString> = theme::THEMES
+            .iter()
+            .map(|theme| theme.name.into())
+            .collect();
+        window.set_theme_names(ModelRc::new(VecModel::from(names)));
+        show_theme(window, theme);
         window.set_results(ModelRc::from(self.results.clone()));
         window.set_jobs(ModelRc::from(self.jobs.clone()));
         window.set_output_dir(settings.output.display().to_string().into());
@@ -444,6 +454,8 @@ impl App {
         });
         let app = self.clone();
         window.on_format_changed(move || app.format_changed());
+        let app = self.clone();
+        window.on_theme_changed(move |index| app.theme_changed(index));
         let app = self.clone();
         window.on_open_folder(move || app.open_folder());
 
@@ -1320,7 +1332,21 @@ impl App {
         self.check_downloads(Vec::new());
     }
 
-    /// Shows Settings, where the developer app is set up.
+    /// A theme was chosen in Settings: show it, and keep it for next time.
+    fn theme_changed(&self, index: i32) {
+        let theme = usize::try_from(index)
+            .ok()
+            .and_then(|index| theme::THEMES.get(index));
+        let (Some(window), Some(theme)) = (self.window.upgrade(), theme) else {
+            return;
+        };
+        show_theme(&window, theme);
+        let mut prefs = self.prefs.borrow_mut();
+        prefs.set_theme(theme.id);
+        save_prefs(&prefs);
+    }
+
+    /// Shows Settings, where the theme is chosen and the developer app set up.
     fn open_settings(&self) {
         let Some(window) = self.window.upgrade() else {
             return;
@@ -1444,6 +1470,14 @@ fn chosen_output(window: &AppWindow) -> PathBuf {
 
 fn chosen_format(window: &AppWindow) -> Format {
     FORMATS[(window.get_format_index().max(0) as usize).min(FORMATS.len() - 1)]
+}
+
+/// Colors the window in `theme`.
+fn show_theme(window: &AppWindow, theme: &theme::Theme) {
+    let colors = window.global::<Theme>();
+    colors.set_colors(theme.colors());
+    colors.set_dark(theme.dark);
+    window.set_theme_index(theme.index() as i32);
 }
 
 fn show_app_status(window: &AppWindow, text: &str, bad: bool) {

@@ -5523,6 +5523,7 @@ version = "0.2.0"
 dependencies = [
  "aes",
  "anyhow",
+ "async-io",
  "block2 0.6.2",
  "clap",
  "console",
@@ -5557,6 +5558,7 @@ dependencies = [
  "vergen-gitcl",
  "vergen-lib",
  "windows-sys 0.61.2",
+ "zbus",
  "zune-core",
  "zune-jpeg",
 ]

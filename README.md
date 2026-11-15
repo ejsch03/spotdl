@@ -196,6 +196,13 @@ The folder and format you choose in the window are remembered in `gui.json` in t
 directory, e.g. `{ "output": "/home/me/Music", "format": "ogg" }`. Passing `-o`/`-f` or
 setting `SPOTDL_OUTPUT`/`SPOTDL_FORMAT` overrides them for that run.
 
+**Settings** also picks the window's theme: Light and Dark, GitHub Light and GitHub Dark
+(the default), Nord, Dracula, Solarized, Gruvbox, Catppuccin (Latte and Mocha) and Rosé
+Pine (Dawn and the dark one). It's remembered in `gui.json` too (`"theme": "nord"`). A
+theme that comes in a light and a dark version starts in whichever matches the system's
+light or dark mode at the time; switching the system's mode while the app is open leaves
+the window as it is.
+
 Songs, albums and playlists that are already in the download folder, in the chosen format,
 show a greyed-out **Downloaded** button, since downloading them again would do nothing. (A
 playlist counts once all its songs and its `.m3u8` file are there.)

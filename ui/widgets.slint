@@ -1,0 +1,605 @@
+// The window's colors, and the controls it uses drawn in them. Slint's own controls only
+// come in their style's light and dark looks, so these stand in for them; the Rust side
+// (src/gui/theme.rs) has the themes and sets the colors.
+
+import { ScrollView } from "std-widgets.slint";
+
+export struct ThemeColors {
+    background: color,
+    // buttons, text boxes and menus
+    control: color,
+    foreground: color,
+    // secondary text
+    muted: color,
+    border: color,
+    // primary buttons, the selected filter, progress and focus
+    accent: color,
+    // text on the accent color
+    accent-foreground: color,
+    good: color,
+    bad: color,
+}
+
+export global Theme {
+    // GitHub Light, until the Rust side sets the theme
+    in property <ThemeColors> colors: {
+        background: #ffffff,
+        control: #f6f8fa,
+        foreground: #1f2328,
+        muted: #59636e,
+        border: #d1d9e0,
+        accent: #0969da,
+        accent-foreground: #ffffff,
+        good: #1a7f37,
+        bad: #d1242f,
+    };
+    // a dark theme, so what Slint still draws itself (scroll bars, menus) is dark too
+    in property <bool> dark;
+
+    out property <color> background: colors.background;
+    out property <color> control: colors.control;
+    out property <color> foreground: colors.foreground;
+    out property <color> muted: colors.muted;
+    out property <color> border: colors.border;
+    out property <color> accent: colors.accent;
+    out property <color> accent-foreground: colors.accent-foreground;
+    out property <color> good: colors.good;
+    out property <color> bad: colors.bad;
+
+    // hovered rows, and cards on the background
+    out property <color> faint: colors.foreground.with-alpha(0.07);
+    out property <color> control-hover: colors.control.mix(colors.foreground, 0.93);
+    out property <color> control-pressed: colors.control.mix(colors.foreground, 0.86);
+    out property <color> accent-hover: colors.accent.mix(colors.background, 0.88);
+    out property <color> accent-pressed: colors.accent.mix(colors.background, 0.76);
+    out property <color> selection: colors.accent.with-alpha(0.35);
+    out property <color> shadow: #00000040;
+}
+
+// Shows which control the keyboard is on.
+component FocusRing inherits Rectangle {
+    border-width: 2px;
+    border-color: Theme.accent;
+}
+
+export component Button {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> enabled <=> touch.enabled;
+    out property <bool> has-focus: keys.has-focus;
+
+    callback clicked();
+
+    min-width: max(32px, layout.min-width);
+    min-height: max(32px, layout.min-height);
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    forward-focus: keys;
+    opacity: root.enabled ? 1 : 0.5;
+
+    accessible-role: button;
+    accessible-enabled: root.enabled;
+    accessible-label: root.text;
+    accessible-action-default => {
+        touch.clicked();
+    }
+
+    frame := Rectangle {
+        border-radius: 6px;
+        border-width: root.primary ? 0px : 1px;
+        border-color: Theme.border;
+        background: root.primary ? (touch.pressed ? Theme.accent-pressed : touch.has-hover ? Theme.accent-hover : Theme.accent) : (touch.pressed ? Theme.control-pressed : touch.has-hover ? Theme.control-hover : Theme.control);
+
+        animate background { duration: 120ms; }
+
+        layout := HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 5px;
+            padding-bottom: 5px;
+            alignment: center;
+
+            Text {
+                text: root.text;
+                color: root.primary ? Theme.accent-foreground : Theme.foreground;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    keys := FocusScope {
+        // only for the keyboard: clicks go to the touch area
+        x: 0;
+        width: 0;
+        enabled <=> root.enabled;
+
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return {
+                touch.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if root.has-focus && root.enabled: FocusRing {
+        border-radius: frame.border-radius;
+    }
+}
+
+// The × that empties a text box.
+component ClearButton inherits Rectangle {
+    callback clicked();
+
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    background: touch.has-hover ? Theme.faint : transparent;
+
+    Path {
+        width: 8px;
+        height: 8px;
+        viewbox-width: 8;
+        viewbox-height: 8;
+        commands: "M 0 0 L 8 8 M 8 0 L 0 8";
+        stroke: Theme.muted;
+        stroke-width: 1.5px;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component LineEdit {
+    in property <string> placeholder-text;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> read-only <=> input.read-only;
+    in property <bool> enabled <=> input.enabled;
+    in-out property <string> text <=> input.text;
+    out property <bool> has-focus: input.has-focus;
+
+    callback accepted(text: string);
+    callback edited(text: string);
+
+    // a password shown as plain text, until the box loses focus
+    property <bool> revealed;
+    // keeps the text cursor this far from the box's edges when the text scrolls
+    property <length> margin: 8px;
+
+    changed has-focus => {
+        if !self.has-focus {
+            self.revealed = false;
+        }
+    }
+
+    min-width: max(160px, layout.min-width);
+    min-height: max(32px, layout.min-height);
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    forward-focus: input;
+    opacity: root.enabled ? 1 : 0.5;
+
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-value <=> text;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-read-only: root.read-only;
+    accessible-action-set-value(value) => {
+        self.text = value;
+        self.edited(value);
+    }
+
+    Rectangle {
+        border-radius: 6px;
+        background: Theme.control;
+        border-width: root.has-focus ? 2px : 1px;
+        border-color: root.has-focus ? Theme.accent : Theme.border;
+
+        layout := HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 5px;
+            spacing: 4px;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                // a TextInput that's clipped away entirely can't take the focus
+                min-width: 1px;
+                min-height: input.preferred-height;
+                clip: true;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    vertical-alignment: center;
+                    text: root.text == "" && input.preedit-text == "" ? root.placeholder-text : "";
+                    color: Theme.muted;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+
+                ContextMenuArea {
+                    enabled: root.enabled;
+
+                    Menu {
+                        if !root.read-only && root.enabled: MenuItem {
+                            title: "Undo";
+                            activated => {
+                                input.undo();
+                            }
+                        }
+
+                        if !root.read-only && root.enabled: MenuItem {
+                            title: "Redo";
+                            activated => {
+                                input.redo();
+                            }
+                        }
+
+                        if !root.read-only && root.enabled: MenuSeparator { }
+
+                        MenuItem {
+                            title: "Cut";
+                            enabled: !root.read-only && root.enabled && root.input-type != InputType.password;
+                            activated => {
+                                input.cut();
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Copy";
+                            enabled: root.text != "" && root.input-type != InputType.password;
+                            activated => {
+                                input.copy();
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Paste";
+                            enabled: !root.read-only && root.enabled;
+                            activated => {
+                                input.paste();
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Select All";
+                            enabled: root.text != "";
+                            activated => {
+                                input.select-all();
+                            }
+                        }
+                    }
+
+                    input := TextInput {
+                        // how far the text is scrolled left, to keep the cursor in view
+                        property <length> scroll-x;
+
+                        x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                        width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                        height: 100%;
+                        vertical-alignment: center;
+                        single-line: true;
+                        color: Theme.foreground;
+                        selection-background-color: Theme.selection;
+                        selection-foreground-color: Theme.foreground;
+                        input-type: root.revealed ? InputType.text : root.input-type;
+                        // the LineEdit itself tells assistive technology about it
+                        accessible-role: none;
+
+                        cursor-position-changed(position) => {
+                            if position.x + self.scroll-x < root.margin {
+                                self.scroll-x = root.margin - position.x;
+                            } else if position.x + self.scroll-x > parent.width - root.margin - self.text-cursor-width {
+                                self.scroll-x = parent.width - root.margin - self.text-cursor-width - position.x;
+                            }
+                        }
+
+                        accepted => {
+                            root.accepted(self.text);
+                        }
+
+                        edited => {
+                            root.edited(self.text);
+                        }
+                    }
+                }
+            }
+
+            if root.has-focus && root.text != "" && root.enabled && !root.read-only && root.input-type != InputType.password: VerticalLayout {
+                alignment: center;
+                ClearButton {
+                    clicked => {
+                        root.text = "";
+                        root.edited("");
+                    }
+                }
+            }
+
+            if root.has-focus && root.text != "" && root.input-type == InputType.password: VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: reveal.preferred-width + 12px;
+                    height: 22px;
+                    border-radius: 4px;
+                    background: reveal-touch.has-hover ? Theme.faint : transparent;
+
+                    reveal := Text {
+                        text: root.revealed ? "Hide" : "Show";
+                        font-size: 12px;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                    }
+
+                    reveal-touch := TouchArea {
+                        clicked => {
+                            root.revealed = !root.revealed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component ComboBox {
+    in property <[string]> model;
+    in property <bool> enabled: true;
+    in-out property <int> current-index: 0;
+    out property <string> current-value: root.model[root.current-index];
+    out property <bool> has-focus: (keys.has-focus || root.popup-focused) && root.enabled;
+
+    // a different item was chosen
+    callback selected(value: string);
+
+    property <bool> popup-focused;
+    property <length> item-height: 32px;
+    property <length> popup-padding: 4px;
+    property <int> visible-items: min(8, root.model.length);
+
+    min-width: max(120px, layout.min-width);
+    min-height: max(32px, layout.min-height);
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    forward-focus: keys;
+    opacity: root.enabled ? 1 : 0.5;
+
+    accessible-role: combobox;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: root.popup-focused;
+    accessible-value: root.current-value;
+    accessible-action-expand => {
+        popup.show();
+    }
+
+    function select(index: int) {
+        if !root.enabled || index < 0 || index >= root.model.length || index == root.current-index {
+            return;
+        }
+        root.current-index = index;
+        root.selected(root.current-value);
+    }
+
+    frame := Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: touch.pressed ? Theme.control-pressed : touch.has-hover ? Theme.control-hover : Theme.control;
+
+        animate background { duration: 120ms; }
+
+        layout := HorizontalLayout {
+            padding-left: 11px;
+            padding-right: 11px;
+            spacing: 8px;
+
+            Text {
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                text: root.current-value;
+                color: Theme.foreground;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 10px;
+                    height: 6px;
+                    viewbox-width: 10;
+                    viewbox-height: 6;
+                    commands: "M 1 1 L 5 5 L 9 1";
+                    stroke: Theme.muted;
+                    stroke-width: 1.5px;
+                }
+            }
+        }
+    }
+
+    keys := FocusScope {
+        enabled: root.enabled;
+
+        changed has-focus => {
+            // the popup closed and handed the focus back
+            if self.has-focus {
+                root.popup-focused = false;
+            }
+        }
+
+        key-pressed(event) => {
+            if event.text == Key.UpArrow {
+                root.select(root.current-index - 1);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.select(root.current-index + 1);
+                return accept;
+            }
+            if event.text == Key.Return || event.text == Key.Space {
+                popup.show();
+                return accept;
+            }
+            reject
+        }
+
+        touch := TouchArea {
+            enabled: root.enabled;
+            clicked => {
+                keys.focus();
+                popup.show();
+            }
+        }
+    }
+
+    if root.has-focus: FocusRing {
+        border-radius: frame.border-radius;
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: root.visible-items * root.item-height + 2 * root.popup-padding;
+        close-policy: close-on-click-outside;
+        forward-focus: popup-focus;
+
+        popup-focus := FocusScope {
+            focus-changed-event => {
+                root.popup-focused = self.has-focus;
+            }
+
+            key-pressed(event) => {
+                if event.text == Key.UpArrow {
+                    root.select(root.current-index - 1);
+                    return accept;
+                }
+                if event.text == Key.DownArrow {
+                    root.select(root.current-index + 1);
+                    return accept;
+                }
+                if event.text == Key.Return || event.text == Key.Escape {
+                    popup.close();
+                    return accept;
+                }
+                reject
+            }
+
+            Rectangle {
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.control;
+                drop-shadow-blur: 12px;
+                drop-shadow-offset-y: 4px;
+                drop-shadow-color: Theme.shadow;
+
+                ScrollView {
+                    // opens on the chosen item
+                    content-y: -max(0, root.current-index - root.visible-items + 1) * root.item-height;
+
+                    VerticalLayout {
+                        padding: root.popup-padding;
+                        alignment: start;
+
+                        for value[index] in root.model: Rectangle {
+                            height: root.item-height;
+                            border-radius: 4px;
+                            background: item-touch.has-hover ? Theme.faint : transparent;
+
+                            accessible-role: list-item;
+                            accessible-label: value;
+                            accessible-item-selectable: true;
+                            accessible-item-selected: index == root.current-index;
+                            accessible-item-index: index;
+
+                            // marks the chosen one
+                            Rectangle {
+                                x: 0;
+                                width: 3px;
+                                height: index == root.current-index ? 16px : 0px;
+                                border-radius: 2px;
+                                background: Theme.accent;
+                            }
+
+                            Text {
+                                x: 12px;
+                                width: parent.width - 20px;
+                                height: 100%;
+                                text: value;
+                                color: Theme.foreground;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+
+                            item-touch := TouchArea {
+                                clicked => {
+                                    root.select(index);
+                                    popup.close();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component ProgressIndicator {
+    in property <float> progress;
+
+    min-height: 4px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    accessible-role: progress-indicator;
+    accessible-value: root.progress;
+    accessible-value-minimum: 0.0;
+    accessible-value-maximum: 1.0;
+
+    Rectangle {
+        border-radius: 2px;
+        background: Theme.faint;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * clamp(root.progress, 0, 1);
+            border-radius: 2px;
+            background: Theme.accent;
+        }
+    }
+}
+
+// Something's under way, for an unknown time.
+export component Spinner {
+    min-width: 24px;
+    min-height: 24px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    accessible-role: progress-indicator;
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        // three quarters of a circle, turning once a second
+        commands: "M 12 2 A 10 10 0 1 1 2 12";
+        stroke: Theme.accent;
+        stroke-width: 2.5px;
+        stroke-line-cap: round;
+        transform-rotation: 360deg * mod(animation-tick(), 1s) / 1s;
+    }
+}
