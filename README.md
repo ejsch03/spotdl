@@ -20,8 +20,9 @@ Album · samurai champloo music record departure — Nujabes, fat jon · 2004 ·
 
 ## Setup
 
-You need a Spotify **Premium** account, a Rust toolchain, and [ffmpeg](https://ffmpeg.org)
-on your `PATH` if you want FLAC, MP3 or Opus (the default, Ogg, doesn't need it).
+You need a Spotify **Premium** account, a Rust toolchain (except with the Windows
+installer), and [ffmpeg](https://ffmpeg.org) on your `PATH` if you want FLAC, MP3 or Opus
+(the default, Ogg, doesn't need it).
 
 On Linux, install it with its app menu entry and icon:
 
@@ -42,18 +43,31 @@ needs Rust and Apple's command line tools (`xcode-select --install`). For FLAC, 
 Opus, `brew install ffmpeg`; the app finds Homebrew's ffmpeg even when it's started from the
 Dock. See [On a Mac](#on-a-mac) for using an external drive.
 
-On Windows, install Rust from <https://rustup.rs> (it offers to set up the Visual Studio
-C++ build tools it needs), then, in this folder:
+On Windows, spotdl comes as an installer: `spotdl-<version>-x64-setup.exe`, or
+`spotdl-<version>-arm64-setup.exe` for Windows on ARM. It installs both programs for you
+alone without asking for admin rights (in `%LOCALAPPDATA%\Programs\spotdl`), or for everyone
+on the PC if you choose (in Program Files). It adds **spotdl** to the Start menu and the
+`spotdl` command to your PATH, and you can uninstall it from Settings → Apps. Running a
+newer installer updates spotdl. Then:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1   # add -Uninstall to remove it again
-spotdl login
+spotdl login   # or log in from the app
 ```
 
-This puts both programs in `%LOCALAPPDATA%\Programs\spotdl`, adds that folder to your PATH,
-and adds **spotdl** to the Start menu with its icon. For FLAC, MP3 or Opus,
-`winget install Gyan.FFmpeg`; the app finds it without a restart. See
-[On Windows](#on-windows).
+To build the installer yourself, install Rust from <https://rustup.rs> (it offers to set up
+the Visual Studio C++ build tools it needs) and Inno Setup, which makes the installer
+(`winget install JRSoftware.InnoSetup.7`). Then, in this folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1              # build the installer, then install with it
+powershell -ExecutionPolicy Bypass -File install.ps1 -BuildOnly   # only build it, into target\installer
+powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall   # remove spotdl again
+```
+
+Add `-Target aarch64-pc-windows-msvc` for the Windows on ARM installer (after `rustup target
+add aarch64-pc-windows-msvc`). CI builds both installers on every push, and keeps them as
+the run's `windows-installers` artifact. For FLAC, MP3 or Opus, `winget install
+Gyan.FFmpeg`; the app finds it without a restart. See [On Windows](#on-windows).
 
 Elsewhere, or for the command line alone (e.g. on a server):
 
@@ -292,20 +306,27 @@ Everything works the same on Windows. A few things are worth knowing:
   spotdl's icon to bring the window back, or right-click it to quit. Windows may tuck new
   icons away under the **^** arrow at first; drag spotdl's onto the taskbar to keep it in
   sight.
-- **Windows on ARM** works the same: on an ARM computer, rustup sets up the ARM toolchain,
-  and `install.ps1` builds for it.
-- **Copying the programs.** `spotdl-gui.exe` and `spotdl.exe` each run on their own: copy
-  one to another Windows 10 or 11 PC and it works without installing anything (except
-  ffmpeg, for FLAC, MP3 or Opus). The login and settings aren't in the `.exe`; they stay in
-  `%APPDATA%\spotdl` on the PC they were made on.
-- **"Windows protected your PC".** spotdl isn't signed, so SmartScreen stops a copy that came
-  from the internet (a download, a chat app, an email). Choose **More info** → **Run
-  anyway**, or unblock the file once: right-click it → **Properties** → tick **Unblock** →
-  **OK** (or `Unblock-File .\spotdl-gui.exe` in PowerShell). Unblock a `.zip` before
-  extracting it, or what's in it stays blocked. A copy you built yourself is never stopped.
-  Smart App Control, on some Windows 11 PCs, blocks unsigned programs outright: there's no
-  way to run them anyway short of turning it off (Windows Security → App & browser
-  control), which on many PCs can't be undone without resetting Windows.
+- **Updating and uninstalling.** Run a newer installer to update spotdl. If spotdl is running,
+  the installer closes it first, and anything left to download carries on when you open it
+  again. To remove spotdl, uninstall it from Settings → Apps → Installed apps (or
+  `install.ps1 -Uninstall`). Your login and settings in `%APPDATA%\spotdl` stay; delete that
+  folder too to remove them.
+- **Windows on ARM** has its own installer (`-arm64-`). The x64 one works there too, under
+  emulation. On an ARM computer, rustup sets up the ARM toolchain, and `install.ps1` builds
+  for it.
+- **Copying the programs.** The installer is the easy way to put spotdl on another PC, but
+  `spotdl-gui.exe` and `spotdl.exe` also each run on their own: copy one to another Windows
+  10 or 11 PC and it works without installing anything (except ffmpeg, for FLAC, MP3 or
+  Opus). The login and settings aren't in the `.exe`; they stay in `%APPDATA%\spotdl` on the
+  PC they were made on.
+- **"Windows protected your PC".** spotdl and its installer aren't signed, so SmartScreen
+  stops a copy that came from the internet (a download, a chat app, an email). Choose **More
+  info** → **Run anyway**, or unblock the file once: right-click it → **Properties** → tick
+  **Unblock** → **OK** (or `Unblock-File .\spotdl-0.2.0-x64-setup.exe` in PowerShell). Unblock
+  a `.zip` before extracting it, or what's in it stays blocked. A copy you built yourself is
+  never stopped. Smart App Control, on some Windows 11 PCs, blocks unsigned programs
+  outright: there's no way to run them anyway short of turning it off (Windows Security →
+  App & browser control), which on many PCs can't be undone without resetting Windows.
 - **Sleep.** While it's downloading, spotdl keeps Windows from going to sleep when idle (the
   screen can still turn off). Once the queue is done or paused, it can sleep as usual.
 - **When the drive isn't connected** (say, an external `E:` drive), or it's full or

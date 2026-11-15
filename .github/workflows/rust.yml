@@ -83,24 +83,39 @@ jobs:
         cargo build --target aarch64-pc-windows-msvc --verbose
 
   windows-installer:
-    # what people run to install spotdl on Windows, on a real Windows machine
+    # the installer people run to install spotdl on Windows, on a real Windows machine; the
+    # installers (x64 and ARM64) are kept as this run's "windows-installers" artifact
     runs-on: windows-latest
     defaults:
       run:
         shell: powershell
+    env:
+      APP_KEY: HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{F8C04EF7-E87E-41A3-B99A-AF43699A8A4A}_is1
     steps:
     - uses: actions/checkout@v4
-    - name: Give the PATH an entry with a variable in it, which installing must leave alone
+    - name: Install Inno Setup, which makes the installer
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $setup = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.1-x64.exe'
+        Invoke-WebRequest https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe -OutFile $setup
+        if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne '8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0') {
+          throw "the Inno Setup download isn't the expected file"
+        }
+        $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER' -Wait -PassThru
+        if ($p.ExitCode -ne 0) { throw "installing Inno Setup failed (exit code $($p.ExitCode))" }
+    - name: Give the PATH an entry with a variable in it and a ';' at the end, which installing must leave alone
       run: |
         $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-        Set-ItemProperty HKCU:\Environment -Name Path -Value "$path;%USERPROFILE%\spotdl-ci-marker" -Type ExpandString
-    - name: Install
+        $path = "$path;%USERPROFILE%\spotdl-ci-marker;"
+        Set-ItemProperty HKCU:\Environment -Name Path -Value $path -Type ExpandString
+        Set-Content -Path (Join-Path $env:RUNNER_TEMP 'path-before.txt') -Value $path -NoNewline
+    - name: Build the installer and install
       run: powershell -ExecutionPolicy Bypass -File install.ps1
     - name: Check what was installed
       run: |
         $ErrorActionPreference = 'Stop'
         $dir = Join-Path $env:LOCALAPPDATA 'Programs\spotdl'
-        foreach ($file in 'spotdl.exe', 'spotdl-gui.exe', 'spotdl.ico') {
+        foreach ($file in 'spotdl.exe', 'spotdl-gui.exe', 'LICENSE.txt', 'unins000.exe') {
           if (-not (Test-Path (Join-Path $dir $file))) { throw "$file wasn't installed" }
         }
         & (Join-Path $dir 'spotdl.exe') --version
@@ -109,20 +124,51 @@ jobs:
         if (-not (Test-Path $shortcut)) { throw 'no Start menu entry' }
         $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
         if ($link.TargetPath -ne (Join-Path $dir 'spotdl-gui.exe')) { throw "the Start menu entry opens $($link.TargetPath)" }
-        if ($link.IconLocation -notlike '*spotdl.ico*') { throw "the Start menu entry's icon is $($link.IconLocation)" }
+        $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+        $app = Get-ItemProperty $env:APP_KEY
+        if ($app.DisplayName -ne 'spotdl' -or $app.DisplayVersion -ne $version) { throw "Settings > Apps lists $($app.DisplayName) $($app.DisplayVersion)" }
+        $before = Get-Content (Join-Path $env:RUNNER_TEMP 'path-before.txt') -Raw
         $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-        if (($path -split ';') -notcontains $dir) { throw "$dir isn't on the PATH: $path" }
-        if ($path -notlike '*%USERPROFILE%\spotdl-ci-marker*') { throw "the PATH lost its variables: $path" }
-    - name: Install again over the top (an update)
-      run: powershell -ExecutionPolicy Bypass -File install.ps1
-    - name: Uninstall
-      run: powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
-    - name: Check it's all gone, and the rest of the PATH isn't
+        if ($path -cne "$before$dir;") { throw "the PATH should be the one before plus $dir, but it's $path" }
+    - name: Install again over the top (an update), with the desktop app running
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = Join-Path $env:LOCALAPPDATA 'Programs\spotdl'
+        Start-Process (Join-Path $dir 'spotdl-gui.exe') -ArgumentList '--config-dir', "$env:RUNNER_TEMP\spotdl-config", '-o', "$env:RUNNER_TEMP\spotdl-music"
+        Start-Sleep -Seconds 10
+        if (-not (Get-Process spotdl-gui -ErrorAction SilentlyContinue)) { throw "the desktop app didn't start" }
+        $took = Measure-Command { powershell -ExecutionPolicy Bypass -File install.ps1 }
+        if ($LASTEXITCODE -ne 0) { throw 'updating failed' }
+        if (Get-Process spotdl-gui -ErrorAction SilentlyContinue) { throw 'the desktop app is still running' }
+        Write-Host "updating took $([int]$took.TotalSeconds) seconds"
+        $before = Get-Content (Join-Path $env:RUNNER_TEMP 'path-before.txt') -Raw
+        $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        if ($path -cne "$before$dir;") { throw "updating changed the PATH to $path" }
+    - name: Uninstall, with the desktop app running
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Start-Process (Join-Path $env:LOCALAPPDATA 'Programs\spotdl\spotdl-gui.exe') -ArgumentList '--config-dir', "$env:RUNNER_TEMP\spotdl-config", '-o', "$env:RUNNER_TEMP\spotdl-music"
+        Start-Sleep -Seconds 10
+        powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+        if ($LASTEXITCODE -ne 0) { throw 'uninstalling failed' }
+    - name: Check it's all gone, and the PATH is as it was
       run: |
         $ErrorActionPreference = 'Stop'
         $dir = Join-Path $env:LOCALAPPDATA 'Programs\spotdl'
         if (Test-Path $dir) { throw "$dir is still there" }
+        if (Get-Process spotdl-gui -ErrorAction SilentlyContinue) { throw 'the desktop app is still running' }
         if (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'spotdl.lnk')) { throw 'the Start menu entry is still there' }
+        if (Test-Path $env:APP_KEY) { throw 'Settings > Apps still lists spotdl' }
+        $before = Get-Content (Join-Path $env:RUNNER_TEMP 'path-before.txt') -Raw
         $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-        if (($path -split ';') -contains $dir) { throw "$dir is still on the PATH: $path" }
-        if ($path -notlike '*%USERPROFILE%\spotdl-ci-marker*') { throw "uninstalling took other PATH entries: $path" }
+        if ($path -cne $before) { throw "the PATH should be back to $before, but it's $path" }
+    - name: Build the installer for Windows on ARM
+      run: |
+        rustup target add aarch64-pc-windows-msvc
+        powershell -ExecutionPolicy Bypass -File install.ps1 -BuildOnly -Target aarch64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw 'building the ARM installer failed' }
+    - uses: actions/upload-artifact@v4
+      with:
+        name: windows-installers
+        path: target/installer/*.exe
+        if-no-files-found: error
