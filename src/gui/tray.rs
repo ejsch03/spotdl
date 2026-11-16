@@ -2,8 +2,8 @@
 //! the icon brings the window back, and its menu has Quit.
 //!
 //! On Linux it's a StatusNotifierItem, which KDE shows, and GNOME with the AppIndicator
-//! extension. On Windows it's in the notification area. Elsewhere (macOS for now), or
-//! when there's no tray, closing the window quits as usual.
+//! extension. On Windows it's in the notification area, and on macOS the menu bar.
+//! Elsewhere, or when there's no tray, closing the window quits as usual.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub struct Tray {
     #[cfg(target_os = "linux")]
     status: std::sync::mpsc::Sender<String>,
     /// The icon itself. It belongs to the UI thread, whose event loop runs its window.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     icon: RefCell<Option<tray_icon::TrayIcon>>,
     last_status: RefCell<String>,
 }
@@ -82,7 +82,21 @@ impl Tray {
         }
     }
 
-    #[cfg(not(any(target_os = "linux", windows)))]
+    /// Puts the icon in the menu bar. Call on the UI thread. Clicking it shows the window
+    /// (Cmd+Q quits).
+    #[cfg(target_os = "macos")]
+    pub fn start(window: slint::Weak<AppWindow>) -> Self {
+        let icon = macos::start(window)
+            .inspect_err(|e| log::info!("no menu bar icon ({e:#}); closing the window quits"))
+            .ok();
+        Self {
+            showing: Arc::new(AtomicBool::new(icon.is_some())),
+            icon: RefCell::new(icon),
+            last_status: RefCell::default(),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     pub fn start(_window: slint::Weak<AppWindow>) -> Self {
         Self {
             showing: Arc::default(),
@@ -94,7 +108,7 @@ impl Tray {
     /// removed behind until the mouse passes over it.)
     pub fn remove(&self) {
         self.showing.store(false, Ordering::Release);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         drop(self.icon.borrow_mut().take());
     }
 
@@ -113,13 +127,44 @@ impl Tray {
         {
             _ = self.status.send(status.clone());
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some(icon) = &*self.icon.borrow()
             && let Err(e) = icon.set_tooltip(Some(tooltip(&status)))
         {
             log::debug!("couldn't update the icon's tooltip: {e}");
         }
         *last = status;
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+    use crate::AppWindow;
+
+    pub fn start(window: slint::Weak<AppWindow>) -> anyhow::Result<TrayIcon> {
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                _ = window.upgrade_in_event_loop(|window| {
+                    use slint::ComponentHandle;
+                    if let Err(e) = window.show() {
+                        log::warn!("couldn't show the window: {e}");
+                    }
+                });
+            }
+        }));
+        let (width, height, argb) = super::draw(44);
+        let icon = Icon::from_rgba(super::rgba(&argb), width as u32, height as u32)?;
+        Ok(TrayIconBuilder::new()
+            .with_icon(icon)
+            .with_tooltip("spotdl")
+            .build()?)
     }
 }
 
@@ -272,7 +317,7 @@ impl ksni::Tray for Icon {
 }
 
 /// The tooltip for `status`, within Windows' limit of 127 characters.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn tooltip(status: &str) -> String {
     const MAX: usize = 120;
     let text = format!("spotdl · {status}");
@@ -293,7 +338,7 @@ fn tooltip(status: &str) -> String {
 }
 
 /// ARGB pixels (as [`draw`] makes them) as RGBA.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn rgba(argb: &[u8]) -> Vec<u8> {
     argb.as_chunks::<4>()
         .0
@@ -315,7 +360,7 @@ fn picture(size: i32) -> ksni::Icon {
     }
 }
 
-#[cfg(any(target_os = "linux", windows, test))]
+#[cfg(any(target_os = "linux", windows, target_os = "macos", test))]
 fn draw(size: i32) -> (i32, i32, Vec<u8>) {
     const SAMPLES: i32 = 4;
     // the shapes of spotdl-small.svg, in its 512 units

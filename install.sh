@@ -49,7 +49,14 @@ refresh() {
     command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
 }
 
+# The app keeps running in the tray when its window closes, so quit it before replacing
+# or removing it (a new copy would otherwise just show the old one).
+quit_app() {
+    pkill -x spotdl-gui 2>/dev/null && sleep 1 || true
+}
+
 if [ "${1:-}" = "--uninstall" ]; then
+    quit_app
     rm -f "$bin/spotdl" "$bin/spotdl-gui"
     if [ "$system" = macos ]; then
         rm -rf "$app"
@@ -73,6 +80,7 @@ else
     cargo build --release --locked
 fi
 
+quit_app
 put 755 target/release/spotdl "$bin/spotdl"
 put 755 target/release/spotdl-gui "$bin/spotdl-gui"
 

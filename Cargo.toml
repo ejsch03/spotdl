@@ -104,6 +104,12 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSUserDefaults",
 ] }
 
+# the desktop app's menu bar icon
+[target.'cfg(target_os = "macos")'.dependencies.tray-icon]
+version = "0.24.2"
+optional = true
+default-features = false
+
 # free space on the download drive, and a plain fsync where macOS can't do a full one
 # (see `spotdl::output`)
 [target.'cfg(unix)'.dependencies]
