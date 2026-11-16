@@ -86,8 +86,8 @@ fn main() -> std::process::ExitCode {
     // Slint draws its own menus (the Queue menu, text boxes' Cut/Copy/Paste) instead of
     // Windows' native ones. Native menus go through one event handler for the whole
     // program, which can be set only once, and the notification area icon's menu needs
-    // it (see `tray`).
-    #[cfg(windows)]
+    // it (see `tray`). The same goes for the Mac's menu bar icon.
+    #[cfg(any(windows, target_os = "macos"))]
     // SAFETY: nothing else runs yet (no other thread could be reading the environment),
     // and Windows synchronizes access to it anyway.
     unsafe {

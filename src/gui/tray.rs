@@ -70,7 +70,7 @@ impl Tray {
     /// icon's clicks to a window of that thread, which Slint's event loop serves.
     #[cfg(windows)]
     pub fn start(window: slint::Weak<AppWindow>) -> Self {
-        let icon = windows::start(window)
+        let icon = native::start(window)
             .inspect_err(|e| {
                 log::info!("no notification area icon ({e:#}); closing the window quits")
             })
@@ -82,11 +82,10 @@ impl Tray {
         }
     }
 
-    /// Puts the icon in the menu bar. Call on the UI thread. Clicking it shows the window
-    /// (Cmd+Q quits).
+    /// Puts the icon in the menu bar. Call on the UI thread.
     #[cfg(target_os = "macos")]
     pub fn start(window: slint::Weak<AppWindow>) -> Self {
-        let icon = macos::start(window)
+        let icon = native::start(window)
             .inspect_err(|e| log::info!("no menu bar icon ({e:#}); closing the window quits"))
             .ok();
         Self {
@@ -137,39 +136,8 @@ impl Tray {
     }
 }
 
-#[cfg(target_os = "macos")]
-mod macos {
-    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-
-    use crate::AppWindow;
-
-    pub fn start(window: slint::Weak<AppWindow>) -> anyhow::Result<TrayIcon> {
-        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                _ = window.upgrade_in_event_loop(|window| {
-                    use slint::ComponentHandle;
-                    if let Err(e) = window.show() {
-                        log::warn!("couldn't show the window: {e}");
-                    }
-                });
-            }
-        }));
-        let (width, height, argb) = super::draw(44);
-        let icon = Icon::from_rgba(super::rgba(&argb), width as u32, height as u32)?;
-        Ok(TrayIconBuilder::new()
-            .with_icon(icon)
-            .with_tooltip("spotdl")
-            .build()?)
-    }
-}
-
-#[cfg(windows)]
-mod windows {
+#[cfg(any(windows, target_os = "macos"))]
+mod native {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -207,12 +175,16 @@ mod windows {
             }
         }));
 
-        // the icon built into spotdl-gui.exe, at every size Windows may want; the drawn
-        // one if that's missing (say, a build made without it)
-        let icon = Icon::from_resource(1, None).or_else(|_| {
-            let (width, height, argb) = super::draw(32);
+        // on Windows, the icon built into spotdl-gui.exe, at every size it may want; the
+        // drawn one if that's missing (say, a build made without it), and on macOS
+        let drawn = |size| {
+            let (width, height, argb) = super::draw(size);
             Icon::from_rgba(super::rgba(&argb), width as u32, height as u32)
-        })?;
+        };
+        #[cfg(windows)]
+        let icon = Icon::from_resource(1, None).or_else(|_| drawn(32))?;
+        #[cfg(target_os = "macos")]
+        let icon = drawn(44)?;
         Ok(TrayIconBuilder::new()
             .with_icon(icon)
             .with_tooltip("spotdl")
