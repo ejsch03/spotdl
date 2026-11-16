@@ -398,6 +398,8 @@ fn missing_drive(output: &Path) -> Option<String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             Some(format!("the drive “{name}” isn't connected"))
         }
+        // the startup disk is linked into /Volumes (e.g. "Macintosh HD"); it's connected
+        Ok(_) if std::fs::canonicalize(&mount_point).is_ok_and(|p| p == Path::new("/")) => None,
         // a drive is a filesystem of its own; this folder is on the same one as /Volumes
         Ok(found) if std::fs::metadata("/Volumes").is_ok_and(|v| v.dev() == found.dev()) => {
             Some(format!(
