@@ -17,13 +17,16 @@ use crate::input::Target;
 use crate::meta::{self, Meta, TrackInfo};
 use crate::output::{self, PlaylistPos};
 
-/// Albums and playlists with more tracks than this aren't checked: telling would mean
-/// loading every track's details just to grey out a button.
-const MAX_TRACKS: usize = 300;
-/// How many track details to load at a time once a collection looks downloaded.
-const BATCH: usize = 8;
+/// Albums and playlists with more tracks than this aren't checked: telling could mean
+/// loading thousands of tracks' details just to grey out a button.
+const MAX_TRACKS: usize = 1000;
 /// Playlists looked up at the same time.
 const PLAYLIST_LOOKUPS: usize = 4;
+/// Loading tracks is split into about this many rounds of requests, so that how far an
+/// album or playlist has got keeps changing while it goes (and stops if it's stuck).
+const TRACK_ROUNDS: usize = 6;
+/// The fewest tracks asked for in one request.
+const MIN_CHUNK: usize = 10;
 /// Track details to keep before starting over.
 const CACHE_LIMIT: usize = 5000;
 /// Playlists change, so their contents are looked up again after this long.
@@ -47,8 +50,7 @@ pub enum Downloaded {
 /// How far checking an album's or playlist's tracks has got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Progress {
-    /// Tracks looked at so far. They're all there (or can't be downloaded, so they don't
-    /// count): the first one missing settles it.
+    /// Tracks whose details are in, so whether they're there is known.
     pub checked: usize,
     pub total: usize,
 }
@@ -57,8 +59,7 @@ pub struct Progress {
 enum Need {
     Album(SpotifyId),
     Playlist(SpotifyId),
-    /// The next of a collection's tracks to look at, and how far it has got.
-    Tracks(Vec<SpotifyId>, Progress),
+    Tracks(Vec<SpotifyId>),
 }
 
 #[derive(Default)]
@@ -73,7 +74,7 @@ impl Needs {
         match need {
             Need::Album(id) => _ = self.albums.insert(id),
             Need::Playlist(id) => _ = self.playlists.insert(id),
-            Need::Tracks(ids, _) => self.tracks.extend(ids),
+            Need::Tracks(ids) => self.tracks.extend(ids),
         }
     }
 }
@@ -150,10 +151,7 @@ impl Checker {
                     false
                 }
                 Err(need) => {
-                    // (a song is one track, so there's nothing to count)
-                    if let Need::Tracks(_, progress) = need
-                        && progress.total > 1
-                    {
+                    if let Some(progress) = self.progress(&targets[i]) {
                         found(i, Downloaded::Checking(Some(progress)));
                     }
                     needs.add(need);
@@ -163,7 +161,50 @@ impl Checker {
             if pending.is_empty() {
                 return;
             }
-            self.load(needs, &mut failed).await;
+            self.load_lists(needs.albums, needs.playlists, &mut failed)
+                .await;
+
+            // the tracks come a chunk at a time: say how far each collection has got as
+            // they do, and settle any whose tracks are all in
+            let ids: Vec<SpotifyId> = needs.tracks.into_iter().collect();
+            let size = ids
+                .len()
+                .div_ceil(TRACK_ROUNDS * meta::CHUNKS_AT_ONCE)
+                .max(MIN_CHUNK);
+            let mut chunks = std::pin::pin!(self.meta.track_chunks(&ids, size));
+            while let Some(chunk) = chunks.next().await {
+                for (id, track) in chunk {
+                    match track {
+                        Ok(track) => _ = self.tracks.insert(id, Arc::new(track)),
+                        Err(e) => {
+                            log::debug!("couldn't check track {}: {e:#}", meta::link("track", id));
+                            failed.insert(id);
+                        }
+                    }
+                }
+                pending.retain(|&i| {
+                    let Some(progress) = self.progress(&targets[i]) else {
+                        return true;
+                    };
+                    if progress.checked == progress.total
+                        && let Ok(downloaded) = self.status(&targets[i], settings, &failed)
+                    {
+                        found(i, Downloaded::Known(downloaded));
+                        return false;
+                    }
+                    found(i, Downloaded::Checking(Some(progress)));
+                    true
+                });
+            }
+        }
+    }
+
+    /// How far checking an album or playlist has got, once its tracks are known.
+    fn progress(&self, target: &Target) -> Option<Progress> {
+        match *target {
+            Target::Album(id) => progress(&self.meta.cached_album(id)?.tracks, &self.tracks),
+            Target::Playlist(id) => progress(&self.playlists.get(&id)?.tracks, &self.tracks),
+            _ => None,
         }
     }
 
@@ -193,8 +234,14 @@ impl Checker {
         }
     }
 
-    async fn load(&mut self, needs: Needs, failed: &mut HashSet<SpotifyId>) {
-        let albums: Vec<SpotifyId> = needs.albums.into_iter().collect();
+    /// Loads albums' and playlists' track lists.
+    async fn load_lists(
+        &mut self,
+        albums: HashSet<SpotifyId>,
+        playlists: HashSet<SpotifyId>,
+        failed: &mut HashSet<SpotifyId>,
+    ) {
+        let albums: Vec<SpotifyId> = albums.into_iter().collect();
         for (id, album) in albums.iter().zip(self.meta.albums(&albums).await) {
             if let Err(e) = album {
                 log::debug!("couldn't check album {}: {e:#}", meta::link("album", *id));
@@ -203,7 +250,7 @@ impl Checker {
         }
 
         let meta = &self.meta;
-        let playlists: Vec<_> = stream::iter(needs.playlists)
+        let playlists: Vec<_> = stream::iter(playlists)
             .map(|id| async move { (id, meta.playlist(id).await) })
             .buffer_unordered(PLAYLIST_LOOKUPS)
             .collect()
@@ -231,18 +278,16 @@ impl Checker {
                 }
             }
         }
-
-        let ids: Vec<SpotifyId> = needs.tracks.into_iter().collect();
-        for (id, track) in self.meta.tracks(&ids, |_| {}).await {
-            match track {
-                Ok(track) => _ = self.tracks.insert(id, Arc::new(track)),
-                Err(e) => {
-                    log::debug!("couldn't check track {}: {e:#}", meta::link("track", id));
-                    failed.insert(id);
-                }
-            }
-        }
     }
+}
+
+/// How many of a collection's tracks (`ids`) have their details loaded, out of how many
+/// it has. A song, being one track, has nothing to count.
+fn progress(ids: &[SpotifyId], tracks: &HashMap<SpotifyId, Arc<TrackInfo>>) -> Option<Progress> {
+    (ids.len() > 1).then(|| Progress {
+        checked: ids.iter().filter(|id| tracks.contains_key(id)).count(),
+        total: ids.len(),
+    })
 }
 
 /// Like [`collection`], for a playlist. Downloading one also writes its `.m3u8` file
@@ -298,14 +343,12 @@ fn collection(
     if unknown.is_empty() {
         return Ok(present);
     }
-    let progress = Progress {
-        checked: ids.len() - unknown.len(),
-        total: ids.len(),
-    };
     // Most things aren't downloaded, and the first missing track settles that, so load
-    // one track at a time until a file turns up.
-    unknown.truncate(if present { BATCH } else { 1 });
-    Err(Need::Tracks(unknown, progress))
+    // just one track until a file turns up. Then all the rest.
+    if !present {
+        unknown.truncate(1);
+    }
+    Err(Need::Tracks(unknown))
 }
 
 #[cfg(test)]
@@ -389,7 +432,7 @@ mod tests {
         settings: &Settings,
     ) -> Result<bool, Vec<SpotifyId>> {
         collection(ids, playlist, tracks, settings, &HashSet::new()).map_err(|need| match need {
-            Need::Tracks(ids, _) => ids,
+            Need::Tracks(ids) => ids,
             _ => unreachable!(),
         })
     }
@@ -475,24 +518,23 @@ mod tests {
 
         // nothing loaded: just the first, which usually settles it
         assert_eq!(check(&ids, None, &HashMap::new(), &s), Err(vec![id(1)]));
-        // the first is there: the next batch
+        // the first is there: all the rest
         touch(&dir.join("Modal Soul/01 - Song 1.ogg"));
         tracks.retain(|k, _| *k == id(1));
         assert_eq!(
             check(&ids, None, &tracks, &s),
-            Err((2..2 + BATCH).map(id).collect())
+            Err((2..=20).map(id).collect())
         );
         // with one of the twenty looked at
-        assert!(matches!(
-            collection(&ids, None, &tracks, &s, &HashSet::new()),
-            Err(Need::Tracks(
-                _,
-                Progress {
-                    checked: 1,
-                    total: 20
-                }
-            ))
-        ));
+        assert_eq!(
+            progress(&ids, &tracks),
+            Some(Progress {
+                checked: 1,
+                total: 20
+            })
+        );
+        // (a song has nothing to count)
+        assert_eq!(progress(&ids[..1], &tracks), None);
         // a track that couldn't be loaded can't be told about
         let failed = HashSet::from([id(5)]);
         assert!(matches!(
