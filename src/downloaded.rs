@@ -35,11 +35,30 @@ struct PlaylistTracks {
     loaded: Instant,
 }
 
+/// What's known about whether a target is downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Downloaded {
+    /// It's still being worked out. For an album or playlist whose tracks are known,
+    /// this says how far checking them has got.
+    Checking(Option<Progress>),
+    Known(bool),
+}
+
+/// How far checking an album's or playlist's tracks has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    /// Tracks looked at so far. They're all there (or can't be downloaded, so they don't
+    /// count): the first one missing settles it.
+    pub checked: usize,
+    pub total: usize,
+}
+
 /// What has to be loaded before a target can be checked.
 enum Need {
     Album(SpotifyId),
     Playlist(SpotifyId),
-    Tracks(Vec<SpotifyId>),
+    /// The next of a collection's tracks to look at, and how far it has got.
+    Tracks(Vec<SpotifyId>, Progress),
 }
 
 #[derive(Default)]
@@ -54,7 +73,7 @@ impl Needs {
         match need {
             Need::Album(id) => _ = self.albums.insert(id),
             Need::Playlist(id) => _ = self.playlists.insert(id),
-            Need::Tracks(ids) => self.tracks.extend(ids),
+            Need::Tracks(ids, _) => self.tracks.extend(ids),
         }
     }
 }
@@ -100,21 +119,22 @@ impl Checker {
 
     /// Works out whether each target is already downloaded, calling `found` with its
     /// index and the answer as soon as it's known: straight away for whatever can be
-    /// told from what's loaded, then the rest as their details arrive. Only tracks,
-    /// albums and playlists are checked. Anything else, and anything that can't be told
-    /// for sure, counts as not downloaded.
+    /// told from what's loaded, then the rest as their details arrive. Meanwhile albums
+    /// and playlists also report how far along they are, as their tracks are looked at.
+    /// Only tracks, albums and playlists are checked. Anything else, and anything that
+    /// can't be told for sure, counts as not downloaded.
     pub async fn check(
         &mut self,
         targets: &[Target],
         settings: &Settings,
-        mut found: impl FnMut(usize, bool),
+        mut found: impl FnMut(usize, Downloaded),
     ) {
         if self.tracks.len() > CACHE_LIMIT {
             *self = Self::new(self.meta.session().clone());
         }
         // with --overwrite everything is downloaded again
         if settings.overwrite {
-            (0..targets.len()).for_each(|i| found(i, false));
+            (0..targets.len()).for_each(|i| found(i, Downloaded::Known(false)));
             return;
         }
 
@@ -126,10 +146,16 @@ impl Checker {
             let mut needs = Needs::default();
             pending.retain(|&i| match self.status(&targets[i], settings, &failed) {
                 Ok(downloaded) => {
-                    found(i, downloaded);
+                    found(i, Downloaded::Known(downloaded));
                     false
                 }
                 Err(need) => {
+                    // (a song is one track, so there's nothing to count)
+                    if let Need::Tracks(_, progress) = need
+                        && progress.total > 1
+                    {
+                        found(i, Downloaded::Checking(Some(progress)));
+                    }
                     needs.add(need);
                     true
                 }
@@ -272,10 +298,14 @@ fn collection(
     if unknown.is_empty() {
         return Ok(present);
     }
+    let progress = Progress {
+        checked: ids.len() - unknown.len(),
+        total: ids.len(),
+    };
     // Most things aren't downloaded, and the first missing track settles that, so load
     // one track at a time until a file turns up.
     unknown.truncate(if present { BATCH } else { 1 });
-    Err(Need::Tracks(unknown))
+    Err(Need::Tracks(unknown, progress))
 }
 
 #[cfg(test)]
@@ -359,7 +389,7 @@ mod tests {
         settings: &Settings,
     ) -> Result<bool, Vec<SpotifyId>> {
         collection(ids, playlist, tracks, settings, &HashSet::new()).map_err(|need| match need {
-            Need::Tracks(ids) => ids,
+            Need::Tracks(ids, _) => ids,
             _ => unreachable!(),
         })
     }
@@ -452,6 +482,17 @@ mod tests {
             check(&ids, None, &tracks, &s),
             Err((2..2 + BATCH).map(id).collect())
         );
+        // with one of the twenty looked at
+        assert!(matches!(
+            collection(&ids, None, &tracks, &s, &HashSet::new()),
+            Err(Need::Tracks(
+                _,
+                Progress {
+                    checked: 1,
+                    total: 20
+                }
+            ))
+        ));
         // a track that couldn't be loaded can't be told about
         let failed = HashSet::from([id(5)]);
         assert!(matches!(

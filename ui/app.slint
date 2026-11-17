@@ -18,6 +18,9 @@ export struct ResultRow {
     downloaded: bool,
     // whether it's downloaded is still being worked out
     checking: bool,
+    // meanwhile, how many of an album's or playlist's tracks are checked, as "4/268"
+    // (empty until that's known, and for songs)
+    progress: string,
     // empty until it has loaded (or if there's none); `initial` stands in meanwhile
     image: image,
     initial: string,
@@ -160,11 +163,20 @@ component ResultItem inherits Rectangle {
                 }
             }
 
-            Text {
-                text: "Checking…";
-                font-size: 13px;
-                color: Theme.muted;
-                vertical-alignment: center;
+            VerticalLayout {
+                alignment: center;
+
+                Text {
+                    text: "Checking…";
+                    font-size: 13px;
+                    color: Theme.muted;
+                }
+
+                if root.hit.progress != "": Text {
+                    text: root.hit.progress;
+                    font-size: 11px;
+                    color: Theme.muted;
+                }
             }
         }
 

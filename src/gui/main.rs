@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, watch};
 
 use spotdl::auth::{self, Auth, Connection};
 use spotdl::cli::{DownloadArgs, Format, GlobalArgs};
-use spotdl::downloaded::{self, Checker};
+use spotdl::downloaded::{self, Checker, Downloaded};
 use spotdl::engine::{self, Downloader, Event, Reporter, Settings, Stats, TrackState, count};
 use spotdl::input::{self, Input, Target};
 use spotdl::login::{self, BrowserLogin};
@@ -331,9 +331,8 @@ struct State {
     note: Option<String>,
     /// Which hit each visible row shows.
     shown: Vec<usize>,
-    /// Which hits are already in the download folder, by hit: `None` while that's
-    /// being worked out.
-    downloaded: Vec<Option<bool>>,
+    /// Which hits are already in the download folder, by hit.
+    downloaded: Vec<Downloaded>,
     /// Bumped for every check of the hits against the download folder.
     check_generation: u64,
     check_task: Option<tokio::task::AbortHandle>,
@@ -384,11 +383,11 @@ impl State {
 
 /// What's known about whether `hit` is downloaded before it's checked: nothing, unless
 /// it's something that's never checked.
-fn unchecked(hit: &Hit) -> Option<bool> {
+fn unchecked(hit: &Hit) -> Downloaded {
     if downloaded::checkable(&hit.target()) {
-        None
+        Downloaded::Checking(None)
     } else {
-        Some(false)
+        Downloaded::Known(false)
     }
 }
 
@@ -852,22 +851,18 @@ impl App {
         });
     }
 
-    fn set_downloaded(&self, generation: u64, hit: usize, downloaded: bool) {
+    fn set_downloaded(&self, generation: u64, hit: usize, downloaded: Downloaded) {
         let mut state = self.state.borrow_mut();
         if state.check_generation != generation
-            || state
-                .downloaded
-                .get(hit)
-                .is_none_or(|d| *d == Some(downloaded))
+            || state.downloaded.get(hit).is_none_or(|d| *d == downloaded)
         {
             return;
         }
-        state.downloaded[hit] = Some(downloaded);
+        state.downloaded[hit] = downloaded;
         if let Some(row) = state.shown.iter().position(|&shown| shown == hit)
             && let Some(mut data) = self.results.row_data(row)
         {
-            data.downloaded = downloaded;
-            data.checking = false;
+            show_downloaded(&mut data, downloaded);
             self.results.set_row_data(row, data);
         }
     }
@@ -881,7 +876,9 @@ impl App {
                 return;
             }
             for downloaded in &mut state.downloaded {
-                downloaded.get_or_insert(false);
+                if let Downloaded::Checking(_) = downloaded {
+                    *downloaded = Downloaded::Known(false);
+                }
             }
         }
         self.refresh_buttons();
@@ -1002,7 +999,11 @@ impl App {
         let rows: Vec<ResultRow> = shown
             .iter()
             .map(|&i| {
-                let downloaded = state.downloaded.get(i).copied().unwrap_or(Some(false));
+                let downloaded = state
+                    .downloaded
+                    .get(i)
+                    .copied()
+                    .unwrap_or(Downloaded::Known(false));
                 result_row(&state.hits[i], &state.queued, downloaded, &state.thumbnails)
             })
             .collect();
@@ -1082,16 +1083,15 @@ impl App {
     fn refresh_buttons(&self) {
         let state = self.state.borrow();
         for (row, &index) in state.shown.iter().enumerate() {
-            let queued = state.queued.contains_key(&state.hits[index].link());
-            let downloaded = state.downloaded.get(index).copied().unwrap_or(Some(false));
-            if let Some(mut data) = self.results.row_data(row)
-                && (data.queued, data.downloaded, data.checking)
-                    != (queued, downloaded == Some(true), downloaded.is_none())
-            {
-                data.queued = queued;
-                data.downloaded = downloaded == Some(true);
-                data.checking = downloaded.is_none();
-                self.results.set_row_data(row, data);
+            let Some(data) = self.results.row_data(row) else {
+                continue;
+            };
+            let mut fresh = data.clone();
+            fresh.queued = state.queued.contains_key(&state.hits[index].link());
+            let downloaded = state.downloaded.get(index).copied();
+            show_downloaded(&mut fresh, downloaded.unwrap_or(Downloaded::Known(false)));
+            if fresh != data {
+                self.results.set_row_data(row, fresh);
             }
         }
     }
@@ -1572,11 +1572,10 @@ fn save_prefs(prefs: &Prefs) {
     }
 }
 
-/// `downloaded` is `None` while that's being checked.
 fn result_row(
     hit: &Hit,
     queued: &HashMap<String, i32>,
-    downloaded: Option<bool>,
+    downloaded: Downloaded,
     thumbnails: &HashMap<String, slint::Image>,
 ) -> ResultRow {
     let subtitle = if hit.subtitle.is_empty() {
@@ -1590,13 +1589,11 @@ fn result_row(
         .take(1)
         .flat_map(char::to_uppercase)
         .collect();
-    ResultRow {
+    let mut row = ResultRow {
         title: hit.title.as_str().into(),
         subtitle: subtitle.into(),
         detail: hit.detail.as_str().into(),
         queued: queued.contains_key(&hit.link()),
-        downloaded: downloaded == Some(true),
-        checking: downloaded.is_none(),
         image: hit
             .image
             .as_ref()
@@ -1604,7 +1601,21 @@ fn result_row(
             .unwrap_or_default(),
         initial: initial.into(),
         round: hit.kind == Kind::Artist,
-    }
+        ..ResultRow::default()
+    };
+    show_downloaded(&mut row, downloaded);
+    row
+}
+
+/// Shows on a result's row whether it's downloaded, or that it's being checked and how
+/// far along that is.
+fn show_downloaded(row: &mut ResultRow, downloaded: Downloaded) {
+    row.downloaded = downloaded == Downloaded::Known(true);
+    row.checking = matches!(downloaded, Downloaded::Checking(_));
+    row.progress = match downloaded {
+        Downloaded::Checking(Some(p)) => format!("{}/{}", p.checked, p.total).into(),
+        _ => "".into(),
+    };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2101,21 +2112,23 @@ mod tests {
             ],
             ..State::default()
         };
+        let (checking, yes, no) = (
+            Downloaded::Checking(None),
+            Downloaded::Known(true),
+            Downloaded::Known(false),
+        );
         // new results are all being checked, except artists, which never are
         state.forget_downloaded();
-        assert_eq!(state.downloaded, [None, None, Some(false), None]);
+        assert_eq!(state.downloaded, [checking, checking, no, checking]);
 
         // once a job is over, its results are checked again, and only those
-        state.downloaded = vec![Some(true), Some(false), Some(false), Some(false)];
+        state.downloaded = vec![yes, no, no, no];
         let links: Vec<String> = state.hits.iter().map(Hit::link).collect();
         state.queued.insert(links[1].clone(), 7);
         state.queued.insert(links[2].clone(), 7);
         state.queued.insert(links[3].clone(), 8);
         state.unqueue(&[7]);
-        assert_eq!(
-            state.downloaded,
-            [Some(true), None, Some(false), Some(false)]
-        );
+        assert_eq!(state.downloaded, [yes, checking, no, no]);
         assert_eq!(state.queued, HashMap::from([(links[3].clone(), 8)]));
     }
 
