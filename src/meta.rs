@@ -1,21 +1,28 @@
 //! Spotify metadata, fetched through the logged-in session (no developer app needed).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures_util::{StreamExt, stream};
+use futures_util::{Stream, StreamExt, future, stream};
 use librespot_core::{FileId, Session, SpotifyId, SpotifyUri, date::Date, error::ErrorKind};
 use librespot_metadata::{
     Album, Artist, Metadata, Playlist, Track, album::AlbumType, audio::AudioFileFormat,
 };
+use librespot_protocol::extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery};
+use librespot_protocol::extension_kind::ExtensionKind;
 use librespot_protocol::playlist4_external::{ListAttributes, MetaItem, SelectedListContent};
-use protobuf::{CodedInputStream, CodedOutputStream, Message, rt::WireType};
+use protobuf::{CodedInputStream, CodedOutputStream, EnumOrUnknown, Message, rt::WireType};
 
 /// How many metadata requests to keep in flight at once.
 const CONCURRENCY: usize = 8;
+/// Most tracks or albums asked for in one request. Spotify answers 500 tracks at once in
+/// well under a second, so even a big playlist takes a request or two.
+const BATCH: usize = 200;
+/// How many chunks of tracks [`Meta::track_chunks`] loads at once.
+pub const CHUNKS_AT_ONCE: usize = 4;
 const PLAYLIST_PAGE: usize = 100;
 /// Playlists per page of the user's playlist list (what the Spotify app asks for too).
 const ROOTLIST_PAGE: usize = 120;
@@ -179,12 +186,18 @@ impl Meta {
         }
 
         let uri = SpotifyUri::Album { id };
-        // parse the raw message ourselves too: librespot's `Date` fills in a missing
-        // month/day with 1, and we want to know whether the release date is exact
         let bytes = throttled(|| Album::request(&self.session, &uri))
             .await
             .map_err(missing("album"))?;
-        let msg = <Album as Metadata>::Message::parse_from_bytes(&bytes)?;
+        self.parse_album(id, &bytes)
+    }
+
+    /// Makes sense of an album's metadata, and keeps it.
+    fn parse_album(&self, id: SpotifyId, bytes: &[u8]) -> Result<Arc<AlbumInfo>> {
+        let uri = SpotifyUri::Album { id };
+        // parse the raw message ourselves too: librespot's `Date` fills in a missing
+        // month/day with 1, and we want to know whether the release date is exact
+        let msg = <Album as Metadata>::Message::parse_from_bytes(bytes)?;
         let album = Album::parse(&msg, &uri)?;
         let date = msg
             .date
@@ -243,12 +256,24 @@ impl Meta {
         let track = throttled(|| Track::get(&self.session, &uri))
             .await
             .map_err(missing("track"))?;
+        self.track_info(id, track, &HashMap::new()).await
+    }
+
+    /// Fills in a track's details: its album (fetched unless it's loaded already) and
+    /// whether it can be downloaded. `fetched` has other tracks loaded already (other
+    /// regions' versions of it, say).
+    async fn track_info(
+        &self,
+        id: SpotifyId,
+        track: Track,
+        fetched: &HashMap<SpotifyId, Track>,
+    ) -> Result<TrackInfo> {
         let album_id = match &track.album.id {
             SpotifyUri::Album { id } => *id,
             _ => bail!("track has no album"),
         };
         let album = self.album(album_id).await?;
-        let playable = self.playable(&track).await;
+        let playable = self.playable(&track, fetched).await;
 
         Ok(TrackInfo {
             id,
@@ -273,26 +298,107 @@ impl Meta {
         })
     }
 
-    /// Fetches many tracks concurrently, keeping their order. `progress` is called after
-    /// each one finishes.
+    /// Fetches many tracks, keeping their order. They come [`BATCH`] to a request, and
+    /// so do their albums. `progress` is called with how many are done as each
+    /// request's worth is.
     pub async fn tracks(
         &self,
         ids: &[SpotifyId],
         mut progress: impl FnMut(usize),
     ) -> Vec<(SpotifyId, Result<TrackInfo>)> {
-        let mut done = 0;
-        stream::iter(ids.iter().copied())
-            .map(|id| async move { (id, self.track(id).await) })
-            .buffered(CONCURRENCY)
-            .inspect(|_| {
-                done += 1;
-                progress(done);
+        let mut tracks = Vec::with_capacity(ids.len());
+        let mut chunks = std::pin::pin!(self.track_chunks(ids, BATCH));
+        while let Some(chunk) = chunks.next().await {
+            tracks.extend(chunk);
+            progress(tracks.len());
+        }
+        tracks
+    }
+
+    /// Fetches many tracks in chunks of `size` (one request each, up to [`BATCH`]),
+    /// [`CHUNKS_AT_ONCE`] chunks at a time, and yields each chunk's tracks in order as
+    /// it's done.
+    pub fn track_chunks<'a>(
+        &'a self,
+        ids: &'a [SpotifyId],
+        size: usize,
+    ) -> impl Stream<Item = Vec<(SpotifyId, Result<TrackInfo>)>> + 'a {
+        stream::iter(ids.chunks(size.clamp(1, BATCH)))
+            .map(|chunk| self.track_chunk(chunk))
+            .buffered(CHUNKS_AT_ONCE)
+    }
+
+    /// Fetches some tracks in one request, then their albums and other regions'
+    /// versions (of the ones that can't be played here) in a request each.
+    async fn track_chunk(&self, ids: &[SpotifyId]) -> Vec<(SpotifyId, Result<TrackInfo>)> {
+        let uris: Vec<SpotifyUri> = ids.iter().map(|&id| SpotifyUri::Track { id }).collect();
+        let fetched = self.fetch_tracks(&uris).await;
+        // Tracks that can't be played here mostly have versions released for other
+        // regions, linked as alternatives: fetch those all together too.
+        let alternatives: Vec<SpotifyUri> = fetched
+            .values()
+            .filter(|track| !self.can_play(track))
+            .flat_map(|track| track.alternatives.0.iter().cloned())
+            .collect();
+        let albums: HashSet<SpotifyId> = fetched
+            .values()
+            .filter_map(|track| album_id(&track.album.id))
+            .collect();
+        let albums: Vec<SpotifyId> = albums.into_iter().collect();
+        let (alternatives, _) =
+            future::join(self.fetch_tracks(&alternatives), self.albums(&albums)).await;
+
+        // whatever didn't come with the others is fetched on its own, which says why
+        let tracks: Vec<(SpotifyId, Option<Track>)> = ids
+            .iter()
+            .map(|&id| (id, fetched.get(&id).cloned()))
+            .collect();
+        let alternatives = &alternatives;
+        stream::iter(tracks)
+            .map(|(id, track)| async move {
+                let track = match track {
+                    Some(track) => self.track_info(id, track, alternatives).await,
+                    None => self.track(id).await,
+                };
+                (id, track)
             })
+            .buffered(CONCURRENCY)
             .collect()
             .await
     }
 
+    /// Fetches many tracks' metadata, [`BATCH`] to a request. Whatever doesn't come is
+    /// left out.
+    async fn fetch_tracks(&self, uris: &[SpotifyUri]) -> HashMap<SpotifyId, Track> {
+        let mut fetched = HashMap::new();
+        for (uri, bytes) in self.batched(ExtensionKind::TRACK_V4, uris).await {
+            let track = <Track as Metadata>::Message::parse_from_bytes(&bytes)
+                .map_err(librespot_core::Error::from)
+                .and_then(|msg| Track::parse(&msg, &uri));
+            match (track_id(&uri), track) {
+                (Some(id), Ok(track)) => _ = fetched.insert(id, track),
+                (_, Err(e)) => log::debug!("couldn't read {uri}: {e}"),
+                _ => {}
+            }
+        }
+        fetched
+    }
+
+    /// Fetches many albums, keeping their order. They come [`BATCH`] to a request.
     pub async fn albums(&self, ids: &[SpotifyId]) -> Vec<Result<Arc<AlbumInfo>>> {
+        let wanted: Vec<SpotifyUri> = ids
+            .iter()
+            .filter(|&&id| self.cached_album(id).is_none())
+            .map(|&id| SpotifyUri::Album { id })
+            .collect();
+        for (uri, bytes) in self.batched(ExtensionKind::ALBUM_V4, &wanted).await {
+            if let Some(id) = album_id(&uri)
+                && let Err(e) = self.parse_album(id, &bytes)
+            {
+                log::debug!("couldn't read {uri}: {e:#}");
+            }
+        }
+        // whatever didn't come with the others is fetched on its own, which says why
         stream::iter(ids.iter().copied())
             .map(|id| self.album(id))
             .buffered(CONCURRENCY)
@@ -300,22 +406,88 @@ impl Meta {
             .await
     }
 
-    async fn playable(&self, track: &Track) -> Result<Playable, String> {
+    /// Fetches the metadata of many items of one kind, [`BATCH`] to a request, as each
+    /// one's raw message. What doesn't come back (or a request that fails) is left out,
+    /// for the caller to fetch on its own.
+    async fn batched(
+        &self,
+        kind: ExtensionKind,
+        uris: &[SpotifyUri],
+    ) -> Vec<(SpotifyUri, Vec<u8>)> {
+        let mut found = Vec::new();
+        for chunk in uris.chunks(BATCH) {
+            let request = BatchedEntityRequest {
+                entity_request: chunk
+                    .iter()
+                    .filter_map(|uri| uri.to_uri().ok())
+                    .map(|entity_uri| EntityRequest {
+                        entity_uri,
+                        query: vec![ExtensionQuery {
+                            extension_kind: EnumOrUnknown::new(kind),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let spclient = self.session.spclient();
+            let response = match throttled(|| spclient.get_extended_metadata(request.clone())).await
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    log::debug!("couldn't fetch {} items at once: {e}", chunk.len());
+                    continue;
+                }
+            };
+            // (they come in any order)
+            for data in response
+                .extended_metadata
+                .into_iter()
+                .flat_map(|array| array.extension_data)
+            {
+                let ok = data.header.as_ref().is_some_and(|h| h.status_code == 200);
+                if let (true, Some(value), Ok(uri)) = (
+                    ok,
+                    data.extension_data.into_option(),
+                    SpotifyUri::from_uri(&data.entity_uri),
+                ) {
+                    found.push((uri, value.value));
+                }
+            }
+        }
+        found
+    }
+
+    /// What of the track can be downloaded, or why nothing can. `fetched` has other
+    /// tracks loaded already, which saves fetching its alternatives.
+    async fn playable(
+        &self,
+        track: &Track,
+        fetched: &HashMap<SpotifyId, Track>,
+    ) -> Result<Playable, String> {
         let reason = match self.availability(track) {
             Ok(()) if has_audio(&track.files.0) => return Ok(playable(track)),
             Ok(()) => "no downloadable audio".to_string(),
             Err(reason) => reason,
         };
         // Spotify links to the same recording released for other regions
-        for alt in track.alternatives.0.iter() {
-            if let Ok(alt) = throttled(|| Track::get(&self.session, alt)).await
-                && self.availability(&alt).is_ok()
-                && has_audio(&alt.files.0)
+        for uri in track.alternatives.0.iter() {
+            let alt = match track_id(uri).and_then(|id| fetched.get(&id)) {
+                Some(alt) => Ok(alt.clone()),
+                None => throttled(|| Track::get(&self.session, uri)).await,
+            };
+            if let Ok(alt) = alt
+                && self.can_play(&alt)
             {
                 return Ok(playable(&alt));
             }
         }
         Err(reason)
+    }
+
+    fn can_play(&self, track: &Track) -> bool {
+        self.availability(track).is_ok() && has_audio(&track.files.0)
     }
 
     /// Mirrors librespot's own availability rules, with readable reasons.
