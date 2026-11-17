@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, watch};
 
 use spotdl::auth::{self, Auth, Connection};
 use spotdl::cli::{DownloadArgs, Format, GlobalArgs};
-use spotdl::downloaded::Checker;
+use spotdl::downloaded::{self, Checker};
 use spotdl::engine::{self, Downloader, Event, Reporter, Settings, Stats, TrackState, count};
 use spotdl::input::{self, Input, Target};
 use spotdl::login::{self, BrowserLogin};
@@ -331,8 +331,9 @@ struct State {
     note: Option<String>,
     /// Which hit each visible row shows.
     shown: Vec<usize>,
-    /// Which hits are already in the download folder, by hit.
-    downloaded: Vec<bool>,
+    /// Which hits are already in the download folder, by hit: `None` while that's
+    /// being worked out.
+    downloaded: Vec<Option<bool>>,
     /// Bumped for every check of the hits against the download folder.
     check_generation: u64,
     check_task: Option<tokio::task::AbortHandle>,
@@ -355,6 +356,40 @@ struct State {
     held: Vec<Job>,
     /// The browser login under way, if one is.
     login: Option<LoginInProgress>,
+}
+
+impl State {
+    /// Forgets which hits are downloaded, so that they all show as being checked.
+    fn forget_downloaded(&mut self) {
+        self.downloaded = self.hits.iter().map(unchecked).collect();
+    }
+
+    /// Takes these jobs' results off the queue. They may be downloaded now, so they show
+    /// as being checked again.
+    fn unqueue(&mut self, ids: &[i32]) {
+        let (hits, downloaded) = (&self.hits, &mut self.downloaded);
+        self.queued.retain(|link, job| {
+            if !ids.contains(job) {
+                return true;
+            }
+            for (hit, downloaded) in hits.iter().zip(downloaded.iter_mut()) {
+                if hit.link() == *link {
+                    *downloaded = unchecked(hit);
+                }
+            }
+            false
+        });
+    }
+}
+
+/// What's known about whether `hit` is downloaded before it's checked: nothing, unless
+/// it's something that's never checked.
+fn unchecked(hit: &Hit) -> Option<bool> {
+    if downloaded::checkable(&hit.target()) {
+        None
+    } else {
+        Some(false)
+    }
 }
 
 struct LoginInProgress {
@@ -751,8 +786,8 @@ impl App {
     ) {
         {
             let mut state = self.state.borrow_mut();
-            state.downloaded = vec![false; hits.len()];
             state.hits = hits;
+            state.forget_downloaded();
             state.listing = listing;
             state.note = note;
         }
@@ -763,6 +798,7 @@ impl App {
 
     /// Works out which results are already in the download folder (in the chosen
     /// format) and greys out their Download buttons. Starts over if a check is running.
+    /// Results not known either way show as being checked until their answer is in.
     /// `tracks` are song details that are already loaded.
     fn check_downloads(self: &Rc<Self>, tracks: Vec<TrackInfo>) {
         let Some(window) = self.window.upgrade() else {
@@ -778,7 +814,7 @@ impl App {
             (state.check_generation, targets)
         };
         let Some(conn) = self.conn.get().cloned() else {
-            return;
+            return self.check_done(generation);
         };
         if targets.is_empty() {
             return;
@@ -808,27 +844,47 @@ impl App {
 
         let app = self.clone();
         self.on_ui(async move {
-            // ends once the check is done or replaced
+            // ends once the check is done (or failed) or replaced
             while let Some((hit, downloaded)) = rx.recv().await {
                 app.set_downloaded(generation, hit, downloaded);
             }
+            app.check_done(generation);
         });
     }
 
     fn set_downloaded(&self, generation: u64, hit: usize, downloaded: bool) {
         let mut state = self.state.borrow_mut();
         if state.check_generation != generation
-            || state.downloaded.get(hit).is_none_or(|d| *d == downloaded)
+            || state
+                .downloaded
+                .get(hit)
+                .is_none_or(|d| *d == Some(downloaded))
         {
             return;
         }
-        state.downloaded[hit] = downloaded;
+        state.downloaded[hit] = Some(downloaded);
         if let Some(row) = state.shown.iter().position(|&shown| shown == hit)
             && let Some(mut data) = self.results.row_data(row)
         {
             data.downloaded = downloaded;
+            data.checking = false;
             self.results.set_row_data(row, data);
         }
+    }
+
+    /// The check is over (unless a newer one replaced it): whatever it couldn't tell
+    /// about, because it failed say, counts as not downloaded.
+    fn check_done(&self, generation: u64) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.check_generation != generation {
+                return;
+            }
+            for downloaded in &mut state.downloaded {
+                downloaded.get_or_insert(false);
+            }
+        }
+        self.refresh_buttons();
     }
 
     /// Downloads the thumbnails the current results need, a few at a time, and puts
@@ -946,9 +1002,8 @@ impl App {
         let rows: Vec<ResultRow> = shown
             .iter()
             .map(|&i| {
-                let mut row = result_row(&state.hits[i], &state.queued, &state.thumbnails);
-                row.downloaded = state.downloaded.get(i).copied().unwrap_or(false);
-                row
+                let downloaded = state.downloaded.get(i).copied().unwrap_or(Some(false));
+                result_row(&state.hits[i], &state.queued, downloaded, &state.thumbnails)
             })
             .collect();
 
@@ -1010,27 +1065,32 @@ impl App {
             return;
         };
         self.state.borrow_mut().queued.insert(link, id);
-        self.refresh_queued();
+        self.refresh_buttons();
     }
 
     /// A job ended (done, failed or cancelled): its result can be downloaded again,
     /// unless it's all there now.
     fn job_finished(self: &Rc<Self>, id: i32) {
-        self.state.borrow_mut().queued.retain(|_, job| *job != id);
-        self.refresh_queued();
+        self.state.borrow_mut().unqueue(&[id]);
+        self.refresh_buttons();
         self.check_downloads(Vec::new());
         self.save_queue();
     }
 
-    /// Brings the visible rows' Download/Queued buttons up to date.
-    fn refresh_queued(&self) {
+    /// Brings the visible rows' buttons (Download, Queued, Downloaded or checking) up to
+    /// date.
+    fn refresh_buttons(&self) {
         let state = self.state.borrow();
         for (row, &index) in state.shown.iter().enumerate() {
             let queued = state.queued.contains_key(&state.hits[index].link());
+            let downloaded = state.downloaded.get(index).copied().unwrap_or(Some(false));
             if let Some(mut data) = self.results.row_data(row)
-                && data.queued != queued
+                && (data.queued, data.downloaded, data.checking)
+                    != (queued, downloaded == Some(true), downloaded.is_none())
             {
                 data.queued = queued;
+                data.downloaded = downloaded == Some(true);
+                data.checking = downloaded.is_none();
                 self.results.set_row_data(row, data);
             }
         }
@@ -1192,7 +1252,7 @@ impl App {
                 }
                 state.specs.remove(id);
             }
-            state.queued.retain(|_, job| !ids.contains(job));
+            state.unqueue(ids);
             state.held.retain(|job| !ids.contains(&job.id));
         }
         let keep: Vec<JobRow> = self
@@ -1201,7 +1261,7 @@ impl App {
             .filter(|row| !ids.contains(&row.id))
             .collect();
         self.jobs.set_vec(keep);
-        self.refresh_queued();
+        self.refresh_buttons();
         self.check_downloads(Vec::new());
         self.save_queue();
     }
@@ -1307,6 +1367,14 @@ impl App {
     /// The download folder changed: remember it, and check the results against it.
     fn folder_changed(self: &Rc<Self>) {
         self.remember_folder();
+        self.recheck_downloads();
+    }
+
+    /// The download folder or format changed, so what was found downloaded no longer
+    /// holds: check every result again, showing that it's being checked.
+    fn recheck_downloads(self: &Rc<Self>) {
+        self.state.borrow_mut().forget_downloaded();
+        self.refresh_buttons();
         self.check_downloads(Vec::new());
     }
 
@@ -1329,7 +1397,7 @@ impl App {
             prefs.set_format(chosen_format(&window));
             save_prefs(&prefs);
         }
-        self.check_downloads(Vec::new());
+        self.recheck_downloads();
     }
 
     /// A theme was chosen in Settings: show it, and keep it for next time.
@@ -1504,9 +1572,11 @@ fn save_prefs(prefs: &Prefs) {
     }
 }
 
+/// `downloaded` is `None` while that's being checked.
 fn result_row(
     hit: &Hit,
     queued: &HashMap<String, i32>,
+    downloaded: Option<bool>,
     thumbnails: &HashMap<String, slint::Image>,
 ) -> ResultRow {
     let subtitle = if hit.subtitle.is_empty() {
@@ -1525,7 +1595,8 @@ fn result_row(
         subtitle: subtitle.into(),
         detail: hit.detail.as_str().into(),
         queued: queued.contains_key(&hit.link()),
-        downloaded: false,
+        downloaded: downloaded == Some(true),
+        checking: downloaded.is_none(),
         image: hit
             .image
             .as_ref()
@@ -2005,6 +2076,47 @@ mod tests {
         assert_eq!(expand_home("~/Music"), home.join("Music"));
         assert_eq!(expand_home("/srv/music"), PathBuf::from("/srv/music"));
         assert_eq!(expand_home("~other/x"), PathBuf::from("~other/x"));
+    }
+
+    fn hit(kind: Kind, n: usize) -> Hit {
+        Hit {
+            kind,
+            id: librespot_core::SpotifyId::from_base62(&format!("{n:0>22}")).unwrap(),
+            label: String::new(),
+            title: String::new(),
+            subtitle: String::new(),
+            detail: String::new(),
+            image: None,
+        }
+    }
+
+    #[test]
+    fn results_show_as_being_checked_until_known() {
+        let mut state = State {
+            hits: vec![
+                hit(Kind::Track, 1),
+                hit(Kind::Album, 2),
+                hit(Kind::Artist, 3),
+                hit(Kind::Playlist, 4),
+            ],
+            ..State::default()
+        };
+        // new results are all being checked, except artists, which never are
+        state.forget_downloaded();
+        assert_eq!(state.downloaded, [None, None, Some(false), None]);
+
+        // once a job is over, its results are checked again, and only those
+        state.downloaded = vec![Some(true), Some(false), Some(false), Some(false)];
+        let links: Vec<String> = state.hits.iter().map(Hit::link).collect();
+        state.queued.insert(links[1].clone(), 7);
+        state.queued.insert(links[2].clone(), 7);
+        state.queued.insert(links[3].clone(), 8);
+        state.unqueue(&[7]);
+        assert_eq!(
+            state.downloaded,
+            [Some(true), None, Some(false), Some(false)]
+        );
+        assert_eq!(state.queued, HashMap::from([(links[3].clone(), 8)]));
     }
 
     #[test]

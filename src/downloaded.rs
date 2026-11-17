@@ -59,6 +59,15 @@ impl Needs {
     }
 }
 
+/// Whether [`Checker::check`] looks into `target` at all. It only checks songs, albums
+/// and playlists, and says anything else isn't downloaded straight away.
+pub fn checkable(target: &Target) -> bool {
+    matches!(
+        target,
+        Target::Track(_) | Target::Album(_) | Target::Playlist(_)
+    )
+}
+
 /// Checks search results (or any targets) against the download folder, keeping what it
 /// loads for the next check.
 pub struct Checker {
@@ -153,6 +162,7 @@ impl Checker {
                 _ => Err(Need::Playlist(id)),
             },
             // an artist's downloads depend on all their releases; too much to load here
+            // (see `checkable`)
             _ => Ok(false),
         }
     }

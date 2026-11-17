@@ -16,6 +16,8 @@ export struct ResultRow {
     queued: bool,
     // everything it would download is already in the download folder
     downloaded: bool,
+    // whether it's downloaded is still being worked out
+    checking: bool,
     // empty until it has loaded (or if there's none); `initial` stands in meanwhile
     image: image,
     initial: string,
@@ -143,7 +145,30 @@ component ResultItem inherits Rectangle {
             vertical-alignment: center;
         }
 
-        VerticalLayout {
+        // until it's known whether it's downloaded, this stands in for the button (in
+        // the button's place and size, so nothing moves once the answer is in)
+        if root.hit.checking && !root.hit.queued: HorizontalLayout {
+            width: 108px;
+            alignment: center;
+            spacing: 7px;
+
+            VerticalLayout {
+                alignment: center;
+                Spinner {
+                    width: 16px;
+                    height: 16px;
+                }
+            }
+
+            Text {
+                text: "Checking…";
+                font-size: 13px;
+                color: Theme.muted;
+                vertical-alignment: center;
+            }
+        }
+
+        if !root.hit.checking || root.hit.queued: VerticalLayout {
             alignment: center;
             Button {
                 // the same width whatever it says, so the rows line up
