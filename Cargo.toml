@@ -36,7 +36,7 @@ gui = [
 # Spotify's audio encryption (AES-128-CTR), at the versions librespot-audio uses
 aes = "0.8.4"
 anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4.6.8", features = ["derive", "env", "wrap_help"] }
 console = "0.16"
 ctr = "0.9.2"
 dirs = "6"
@@ -61,7 +61,7 @@ rfd = { version = "0.18", optional = true }
 # the desktop app's saved Downloads list
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = "1"
-slint = { version = "1.18.1", optional = true, default-features = false, features = [
+slint = { version = "1.19.0", optional = true, default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit",
@@ -130,7 +130,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [build-dependencies]
-slint-build = { version = "1.18.1", optional = true }
+slint-build = { version = "1.19.0", optional = true }
 
 [dev-dependencies]
 # only to check our in-place decryption against librespot's
