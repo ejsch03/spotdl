@@ -15,6 +15,7 @@ pub mod input;
 pub mod login;
 pub mod meta;
 pub mod output;
+pub mod plex;
 pub mod search;
 pub mod ui;
 

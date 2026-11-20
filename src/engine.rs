@@ -20,6 +20,7 @@ use crate::cli::{Bitrate, DownloadArgs, Format, Release};
 use crate::input::{self, Input, Target};
 use crate::meta::{self, AlbumInfo, Meta, TrackInfo};
 use crate::output::{self, M3uEntry, PartFile, PlaylistPos, TagData, Template, Unwritable};
+use crate::plex;
 
 /// How many audio key requests in a row Spotify may refuse (or ignore) before
 /// downloading stops. With the default `--retries` that's one track's full set of
@@ -48,7 +49,9 @@ pub struct Settings {
     pub template: Template,
     pub playlist_template: Template,
     pub releases: Vec<Release>,
-    pub m3u: bool,
+    pub m3u: M3u,
+    /// The Plex server playlists go to; `None` unless `--plex` turns that on.
+    pub plex: Option<plex::Config>,
     pub overwrite: bool,
     pub dry_run: bool,
     /// Minimum gap between audio key requests.
@@ -69,12 +72,36 @@ impl Settings {
             )
             .context("invalid --playlist-template")?,
             releases: args.releases.clone(),
-            m3u: args.m3u,
+            m3u: match (args.m3u, args.no_m3u) {
+                (true, _) => M3u::Always,
+                (_, true) => M3u::Never,
+                _ => M3u::Auto,
+            },
+            plex: match args.plex {
+                true => Some(Self::plex_server(args)?),
+                false => None,
+            },
             overwrite: args.overwrite,
             dry_run: args.dry_run,
             delay: Duration::from_secs(args.delay),
             retries: args.retries,
         })
+    }
+
+    /// The Plex server `--plex-url` and `--plex-token` give, whether or not `--plex` turns
+    /// playlists in Plex on. (The desktop app turns them on and off in its Settings.)
+    pub fn plex_server(args: &DownloadArgs) -> Result<plex::Config> {
+        plex::Config::new(&args.plex_url, args.plex_token.clone()).context("invalid --plex-url")
+    }
+
+    /// Whether downloading a playlist always leaves its `.m3u8` file, as far as can be told
+    /// beforehand: with `--m3u`, and by default when playlists don't go to Plex.
+    pub fn always_writes_m3u(&self) -> bool {
+        match self.m3u {
+            M3u::Auto => self.plex.is_none(),
+            M3u::Always => true,
+            M3u::Never => false,
+        }
     }
 
     /// Where a track is saved, relative to `output`. Tracks from a playlist (or Liked
@@ -94,6 +121,29 @@ impl Settings {
             Path::new(&output::sanitize(name)),
             "m3u8",
         ))
+    }
+}
+
+/// When a playlist (or Liked Songs) gets an `.m3u8` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M3u {
+    /// Unless Plex has the playlist instead. Plex doesn't read `.m3u8` files inside its
+    /// libraries, and downloading the playlist again rebuilds it there without the file.
+    /// So it's written without `--plex`, and with it when Plex isn't set up here or has no
+    /// music library holding the download folder.
+    Auto,
+    /// Always (`--m3u`).
+    Always,
+    /// Never (`--no-m3u`).
+    Never,
+}
+
+/// Whether a playlist gets an `.m3u8` file, given how it went in Plex.
+fn writes_m3u(mode: M3u, plex: &plex::Outcome) -> bool {
+    match mode {
+        M3u::Auto => plex.needs_m3u(),
+        M3u::Always => true,
+        M3u::Never => false,
     }
 }
 
@@ -120,11 +170,31 @@ pub enum Event<'a> {
     /// Something other than a track failed (an input lookup, a playlist file).
     Failed(&'a str),
     WrotePlaylist(&'a Path),
+    /// What became of a playlist in Plex (see [`crate::plex`]).
+    Plex(PlexEvent<'a>),
     Track {
         pos: Pos,
         label: &'a str,
         state: TrackState<'a>,
     },
+}
+
+/// What became of a playlist in Plex. Never a failed download: the tracks are there either
+/// way, and running spotdl on the same link again brings the playlist up to date.
+#[derive(Debug)]
+pub enum PlexEvent<'a> {
+    /// Dry run: the playlist would be added to Plex, or brought up to date there.
+    WouldSync {
+        title: &'a str,
+    },
+    /// Plex has no music library holding the download folder, so the playlist isn't in
+    /// Plex (and its `.m3u8` file is written instead).
+    NoLibrary {
+        folder: &'a Path,
+    },
+    Synced(&'a plex::Synced),
+    /// It didn't work. The message says why, and how to try again.
+    Failed(&'a str),
 }
 
 #[derive(Debug)]
@@ -185,12 +255,18 @@ pub struct Stats {
     /// Why the download folder couldn't take files, when that stopped an input early
     /// (the drive isn't connected, is full or read-only, ...).
     pub unwritable: Option<String>,
+    /// Playlists brought up to date in Plex.
+    pub plex_synced: usize,
+    /// What went wrong with playlists in Plex, or is missing from them. Never a failed
+    /// download (see [`PlexEvent`]).
+    pub plex_problems: Vec<String>,
 }
 
 /// What one input expands to.
 struct Collection {
     header: Option<String>,
-    /// Set for playlists and Liked Songs: selects the playlist template and M3U output.
+    /// Set for playlists and Liked Songs: selects the playlist template, and the playlist
+    /// goes to Plex or into an `.m3u8` file.
     playlist: Option<String>,
     items: Vec<Item>,
     notes: Vec<String>,
@@ -647,16 +723,67 @@ impl Downloader {
             }
         }
 
-        // a run that stopped early would replace a complete playlist file with a partial one
+        // a run that stopped early would replace a complete playlist with a partial one
         if let Some(name) = &collection.playlist
-            && self.settings.m3u
-            && !self.settings.dry_run
             && !self.halted
             && !unwritable
-            && !m3u.is_empty()
         {
+            if self.settings.dry_run {
+                self.plan_playlist(name).await;
+            } else if !m3u.is_empty() {
+                self.finish_playlist(name, &m3u).await;
+            }
+        }
+    }
+
+    /// Brings a downloaded playlist up to date in Plex, and writes its `.m3u8` file if the
+    /// settings say to. `entries` are its tracks that are there, in order. A problem with
+    /// Plex doesn't fail the download; it's reported, and the run carries on.
+    async fn finish_playlist(&mut self, name: &str, entries: &[M3uEntry]) {
+        let outcome = match &self.settings.plex {
+            Some(config) => {
+                let reporter = &mut self.reporter;
+                let mut status = |text: &str| reporter.event(Event::Status(Some(text)));
+                let output = &self.settings.output;
+                let outcome = plex::sync(config, output, name, entries, &mut status).await;
+                self.reporter.event(Event::Status(None));
+                outcome
+            }
+            None => plex::Outcome::NotSetUp,
+        };
+        match &outcome {
+            plex::Outcome::NotSetUp => {
+                // turned on, but there's no token to use
+                if self.settings.plex.is_some() {
+                    let message = plex::no_token(name);
+                    self.reporter
+                        .event(Event::Plex(PlexEvent::Failed(&message)));
+                    self.stats.plex_problems.push(message);
+                }
+            }
+            plex::Outcome::NoLibrary => {
+                let folder = &self.settings.output;
+                let event = PlexEvent::NoLibrary { folder };
+                self.reporter.event(Event::Plex(event));
+            }
+            plex::Outcome::Synced(synced) => {
+                self.stats.plex_synced += 1;
+                self.reporter.event(Event::Plex(PlexEvent::Synced(synced)));
+                self.stats.plex_problems.extend(synced.left_out());
+                for warning in &synced.warnings {
+                    self.warn(warning);
+                    self.stats.plex_problems.push(warning.clone());
+                }
+            }
+            plex::Outcome::Failed(message) => {
+                self.reporter.event(Event::Plex(PlexEvent::Failed(message)));
+                self.stats.plex_problems.push(message.clone());
+            }
+        }
+
+        if writes_m3u(self.settings.m3u, &outcome) {
             let path = self.settings.playlist_file(name);
-            match output::write_m3u(&path, &m3u) {
+            match output::write_m3u(&path, entries) {
                 Ok(()) => self.reporter.event(Event::WrotePlaylist(&path)),
                 Err(e) => {
                     let message = format!("{}: {e:#}", path.display());
@@ -664,6 +791,17 @@ impl Downloader {
                     self.stats.failures.push(message);
                 }
             }
+        }
+    }
+
+    /// Dry run: says the playlist would go to Plex, if Plex is set up here. Plex itself
+    /// isn't asked anything.
+    async fn plan_playlist(&mut self, title: &str) {
+        if let Some(config) = &self.settings.plex
+            && config.set_up().await
+        {
+            self.reporter
+                .event(Event::Plex(PlexEvent::WouldSync { title }));
         }
     }
 
@@ -1081,22 +1219,81 @@ mod tests {
     }
 
     #[test]
-    fn playlists_go_under_albums_with_playlist_files_by_default() {
+    fn playlists_go_under_albums_and_to_plex_when_asked() {
         use clap::Parser;
-        let parse = |args: &[&str]| {
+        let settings = |args: &[&str]| {
             let cli = crate::cli::Cli::try_parse_from(args).unwrap();
-            (cli.download.playlist_template.clone(), cli.download.m3u)
+            Settings::from_args(&cli.download).unwrap()
         };
         if std::env::var_os("SPOTDL_PLAYLIST_TEMPLATE").is_none() {
-            assert_eq!(parse(&["spotdl", "x"]), (None, true));
+            let cli = crate::cli::Cli::try_parse_from(["spotdl", "x"]).unwrap();
+            assert_eq!(cli.download.playlist_template, None);
         }
-        assert!(!parse(&["spotdl", "x", "--no-m3u"]).1);
-        let cli = crate::cli::Cli::try_parse_from(["spotdl", "x", "-t", "{title}"]).unwrap();
-        let settings = Settings::from_args(&cli.download).unwrap();
+        let defaults = settings(&["spotdl", "x"]);
+        assert_eq!(defaults.m3u, M3u::Auto);
+        if std::env::var_os("SPOTDL_PLEX").is_none() {
+            assert!(defaults.plex.is_none());
+            assert!(defaults.always_writes_m3u());
+        }
+        let plex = settings(&["spotdl", "x", "--plex"]);
+        assert!(!plex.always_writes_m3u());
+        if std::env::var_os("SPOTDL_PLEX_URL").is_none() {
+            assert_eq!(plex.plex.unwrap().url(), plex::DEFAULT_URL);
+        }
+        assert_eq!(settings(&["spotdl", "x", "--no-m3u"]).m3u, M3u::Never);
+        assert!(!settings(&["spotdl", "x", "--no-m3u"]).always_writes_m3u());
+        let always = settings(&["spotdl", "x", "--plex", "--m3u"]);
+        assert_eq!(always.m3u, M3u::Always);
+        assert!(always.always_writes_m3u());
+        assert!(crate::cli::Cli::try_parse_from(["spotdl", "x", "--m3u", "--no-m3u"]).is_err());
+        let elsewhere = settings(&["spotdl", "x", "--plex", "--plex-url", "192.168.1.20:32400/"]);
+        assert_eq!(elsewhere.plex.unwrap().url(), "http://192.168.1.20:32400");
+        // a broken address only matters once Plex is turned on
+        let broken = ["spotdl", "x", "--plex-url", "http://"];
+        let cli = crate::cli::Cli::try_parse_from(broken).unwrap();
+        assert!(Settings::plex_server(&cli.download).is_err());
+        if std::env::var_os("SPOTDL_PLEX").is_none() {
+            assert!(Settings::from_args(&cli.download).is_ok());
+        }
+        let cli =
+            crate::cli::Cli::try_parse_from(["spotdl", "x", "--plex", "--plex-url", "http://"]);
+        assert!(Settings::from_args(&cli.unwrap().download).is_err());
+
+        let s = settings(&["spotdl", "x", "-t", "{title}"]);
         assert_eq!(
-            format!("{:?}", settings.playlist_template),
-            format!("{:?}", settings.template)
+            format!("{:?}", s.playlist_template),
+            format!("{:?}", s.template)
         );
+    }
+
+    /// The token never shows, even in the settings' debug output.
+    #[test]
+    fn hides_the_plex_token() {
+        use clap::Parser;
+        let secret = "s3cr3t-t0ken-value";
+        let cli =
+            crate::cli::Cli::try_parse_from(["spotdl", "x", "--plex", "--plex-token", secret]);
+        let args = cli.unwrap().download;
+        let settings = Settings::from_args(&args).unwrap();
+        assert!(!format!("{args:?}").contains(secret));
+        assert!(!format!("{settings:?}").contains(secret));
+    }
+
+    #[test]
+    fn writes_playlist_files_only_when_plex_doesnt_have_the_playlist() {
+        use plex::Outcome;
+        let outcomes = [
+            (Outcome::NotSetUp, true),
+            (Outcome::NoLibrary, true),
+            (Outcome::Synced(plex::Synced::default()), false),
+            // the playlist goes to Plex once running spotdl again works
+            (Outcome::Failed("Plex isn't running".into()), false),
+        ];
+        for (outcome, by_default) in outcomes {
+            assert_eq!(writes_m3u(M3u::Auto, &outcome), by_default, "{outcome:?}");
+            assert!(writes_m3u(M3u::Always, &outcome), "{outcome:?}");
+            assert!(!writes_m3u(M3u::Never, &outcome), "{outcome:?}");
+        }
     }
 
     #[test]

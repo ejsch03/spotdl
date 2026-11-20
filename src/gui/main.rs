@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -32,11 +33,14 @@ use tokio::sync::{mpsc, watch};
 use spotdl::auth::{self, Auth, Connection};
 use spotdl::cli::{DownloadArgs, Format, GlobalArgs};
 use spotdl::downloaded::{self, Checker, Downloaded};
-use spotdl::engine::{self, Downloader, Event, Reporter, Settings, Stats, TrackState, count};
+use spotdl::engine::{
+    self, Downloader, Event, PlexEvent, Reporter, Settings, Stats, TrackState, count,
+};
 use spotdl::input::{self, Input, Target};
 use spotdl::login::{self, BrowserLogin};
 use spotdl::meta::{Meta, TrackInfo};
 use spotdl::output;
+use spotdl::plex;
 use spotdl::search::{self, Hit, Kind};
 use spotdl::ui::human_duration;
 
@@ -129,6 +133,14 @@ fn run() -> Result<()> {
     {
         settings.format = format;
     }
+    let plex = PlexSwitch {
+        server: Settings::plex_server(&args.download)?,
+        on: Arc::new(AtomicBool::new(if given(&matches, "plex") {
+            args.download.plex
+        } else {
+            prefs.plex()
+        })),
+    };
     // after a restart (see `restart_with_software_renderer`), what was given is in the
     // saved Downloads list already
     let startup = if std::env::var_os(RESTARTED).is_some() {
@@ -162,6 +174,7 @@ fn run() -> Result<()> {
     rt.spawn(worker(
         conn.clone(),
         settings.clone(),
+        plex.clone(),
         jobs_rx,
         paused,
         window.as_weak(),
@@ -183,6 +196,7 @@ fn run() -> Result<()> {
         tray: tray::Tray::start(window.as_weak()),
         tray_timer: Timer::default(),
         settings: settings.clone(),
+        plex,
         prefs: RefCell::new(prefs),
         checker: Default::default(),
         folder_timer: Timer::default(),
@@ -301,7 +315,9 @@ struct App {
     tray_timer: Timer,
     /// The download options the app started with; the window picks folder and format.
     settings: Settings,
-    /// The folder, format and theme chosen in the window, kept for next time.
+    /// Whether playlists go to Plex, as set in Settings.
+    plex: PlexSwitch,
+    /// The folder, format, theme and Plex setting chosen in the window, kept for next time.
     prefs: RefCell<Prefs>,
     /// Tells which results are already downloaded. Only one check runs at a time.
     checker: Arc<tokio::sync::Mutex<Option<Checker>>>,
@@ -310,6 +326,31 @@ struct App {
     results: Rc<VecModel<ResultRow>>,
     jobs: Rc<VecModel<JobRow>>,
     state: RefCell<State>,
+}
+
+/// Whether downloaded playlists go to Plex, as set in Settings (or for this run with
+/// `--plex`). The download worker shares it, so turning it on or off counts from the next
+/// download on.
+#[derive(Clone)]
+struct PlexSwitch {
+    /// From `--plex-url` and `--plex-token`, or their SPOTDL_* variables.
+    server: plex::Config,
+    on: Arc<AtomicBool>,
+}
+
+impl PlexSwitch {
+    fn is_on(&self) -> bool {
+        self.on.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, on: bool) {
+        self.on.store(on, Ordering::Relaxed);
+    }
+
+    /// For the downloader's settings: the server, while playlists go to Plex.
+    fn server(&self) -> Option<plex::Config> {
+        self.is_on().then(|| self.server.clone())
+    }
 }
 
 /// What the results list is showing.
@@ -418,6 +459,7 @@ impl App {
         window.set_output_dir(settings.output.display().to_string().into());
         let format = FORMATS.iter().position(|f| *f == settings.format);
         window.set_format_index(format.unwrap_or(0) as i32);
+        window.set_plex_on(self.plex.is_on());
         window.set_search_status(self.idle_status().into());
         let saved_login = self.auth.is_logged_in().unwrap_or(false);
         window.set_has_saved_login(saved_login);
@@ -438,6 +480,8 @@ impl App {
         });
         let app = self.clone();
         window.on_open_settings(move || app.open_settings());
+        let app = self.clone();
+        window.on_plex_changed(move || app.plex_changed());
         let app = self.clone();
         window.on_save_developer_app(move || app.save_developer_app());
         let app = self.clone();
@@ -821,6 +865,7 @@ impl App {
         let mut settings = self.settings.clone();
         settings.output = chosen_output(&window);
         settings.format = chosen_format(&window);
+        settings.plex = self.plex.server();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let checker = self.checker.clone();
@@ -1370,8 +1415,8 @@ impl App {
         self.recheck_downloads();
     }
 
-    /// The download folder or format changed, so what was found downloaded no longer
-    /// holds: check every result again, showing that it's being checked.
+    /// The download folder, format or Plex setting changed, so what was found downloaded no
+    /// longer holds: check every result again, showing that it's being checked.
     fn recheck_downloads(self: &Rc<Self>) {
         self.state.borrow_mut().forget_downloaded();
         self.refresh_buttons();
@@ -1414,7 +1459,25 @@ impl App {
         save_prefs(&prefs);
     }
 
-    /// Shows Settings, where the theme is chosen and the developer app set up.
+    /// Plex was turned on or off in Settings: it counts from the next download on, and
+    /// next time too. Whether a playlist's .m3u8 file has to be there for the playlist to
+    /// count as downloaded goes with it, so the results are checked again.
+    fn plex_changed(self: &Rc<Self>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let on = window.get_plex_on();
+        self.plex.set(on);
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.set_plex(on);
+            save_prefs(&prefs);
+        }
+        self.recheck_downloads();
+    }
+
+    /// Shows Settings, where the theme is chosen, Plex turned on and the developer app
+    /// set up.
     fn open_settings(&self) {
         let Some(window) = self.window.upgrade() else {
             return;
@@ -1732,6 +1795,7 @@ struct Job {
 async fn worker(
     conn: Arc<OnceLock<Arc<Connection>>>,
     settings: Settings,
+    plex: PlexSwitch,
     mut jobs: mpsc::UnboundedReceiver<Job>,
     paused: watch::Receiver<bool>,
     ui: slint::Weak<AppWindow>,
@@ -1786,6 +1850,7 @@ async fn worker(
 
         d.settings.output = job.output.clone();
         d.settings.format = job.format;
+        d.settings.plex = plex.server();
         let cancelled = loop {
             d.stats = Stats::default();
             d.reporter = Box::new(JobReporter::new(job.id, ui.clone()));
@@ -1901,6 +1966,9 @@ fn outcome(s: &Stats, halted: bool) -> (JobState, String, String) {
     if s.not_attempted > 0 {
         parts.push(format!("{} not attempted", s.not_attempted));
     }
+    if s.plex_synced > 0 {
+        parts.push("in Plex".to_string());
+    }
     let summary = if parts.is_empty() {
         "Nothing to download".to_string()
     } else {
@@ -1910,9 +1978,11 @@ fn outcome(s: &Stats, halted: bool) -> (JobState, String, String) {
     let detail = if halted {
         engine::HALT_MESSAGE.to_string()
     } else {
-        match s.failures.as_slice() {
+        // failed tracks first, then anything wrong with the playlist in Plex
+        let problems: Vec<&String> = s.failures.iter().chain(&s.plex_problems).collect();
+        match problems.as_slice() {
             [] => String::new(),
-            [only] => only.clone(),
+            [only] => only.to_string(),
             [first, rest @ ..] => format!("{first} (and {} more)", rest.len()),
         }
     };
@@ -2014,6 +2084,31 @@ impl Reporter for JobReporter {
             Event::WrotePlaylist(path) => {
                 let text = format!("Wrote playlist {}", path.display());
                 self.send(true, move |row| row.status = text.into());
+            }
+            Event::Plex(event) => {
+                let (status, detail) = match event {
+                    PlexEvent::WouldSync { title } => {
+                        (Some(format!("“{title}” would be updated in Plex")), None)
+                    }
+                    PlexEvent::NoLibrary { folder } => {
+                        let text = format!(
+                            "Plex has no music library with {} in it, so the playlist isn't \
+                             in Plex",
+                            folder.display()
+                        );
+                        (None, Some(text))
+                    }
+                    PlexEvent::Synced(synced) => (Some(synced.summary()), synced.left_out()),
+                    PlexEvent::Failed(text) => (None, Some(text.to_string())),
+                };
+                self.send(true, move |row| {
+                    if let Some(status) = status {
+                        row.status = status.into();
+                    }
+                    if let Some(detail) = detail {
+                        row.detail = detail.into();
+                    }
+                });
             }
             Event::Track { pos, label, state } => {
                 let n = format!("{}/{}", pos.index, pos.total);
@@ -2200,5 +2295,22 @@ mod tests {
         };
         assert_eq!(outcome(&failed, false).0, JobState::Failed);
         assert_eq!(outcome(&stats, true).0, JobState::Failed);
+
+        // a problem with Plex is worth showing, but the download went fine
+        let plex = Stats {
+            existing: 4,
+            plex_problems: vec!["Couldn't update the playlist in Plex".into()],
+            ..Stats::default()
+        };
+        let (state, summary, detail) = outcome(&plex, false);
+        assert_eq!(state, JobState::Done);
+        assert_eq!(summary, "4 already there");
+        assert_eq!(detail, "Couldn't update the playlist in Plex");
+        let synced = Stats {
+            existing: 4,
+            plex_synced: 1,
+            ..Stats::default()
+        };
+        assert_eq!(outcome(&synced, false).1, "4 already there · in Plex");
     }
 }

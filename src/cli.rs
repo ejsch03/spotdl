@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
+use crate::plex;
+
 pub const DEFAULT_TEMPLATE: &str = "{album_artist}/{album}/{track} - {title}";
 
 fn after_help() -> String {
@@ -118,8 +120,9 @@ pub struct DownloadArgs {
     #[arg(long, env = "SPOTDL_PLAYLIST_TEMPLATE", value_name = "TEMPLATE",
           long_help = format!("File path template for playlists and Liked Songs [default: same as \
           --template]\n\nBy default playlist songs are filed under their albums like everything \
-          else, so each song is stored once, and the .m3u8 files are the playlists. For a folder \
-          per playlist instead, use '{{playlist}}/{{artist}} - {{title}}'.\n\n{TEMPLATE_HELP}"))]
+          else, so each song is stored once, and the playlists are .m3u8 files (or in Plex; see \
+          --plex). For a folder per playlist instead, use \
+          '{{playlist}}/{{artist}} - {{title}}'.\n\n{TEMPLATE_HELP}"))]
     pub playlist_template: Option<String>,
 
     /// Which releases to download for an artist (comma-separated)
@@ -127,9 +130,59 @@ pub struct DownloadArgs {
           default_values_t = [Release::Album, Release::Single])]
     pub releases: Vec<Release>,
 
-    /// Don't write an .m3u8 file for each playlist (and Liked Songs) into the output directory
-    #[arg(long = "no-m3u", action = ArgAction::SetFalse)]
+    /// Write an .m3u8 file for each playlist (and Liked Songs) even when Plex has it
+    #[arg(
+        long,
+        conflicts_with = "no_m3u",
+        long_help = "\
+          Write an .m3u8 file for each playlist (and Liked Songs) into the output directory, \
+          even when Plex has the playlist\n\n\
+          By default the .m3u8 is written unless the playlist went to Plex (see --plex): \
+          that's always without --plex, and with it when Plex isn't set up on this computer \
+          or has no music library holding the output directory. (Plex doesn't read .m3u8 \
+          files inside its libraries.)"
+    )]
     pub m3u: bool,
+
+    /// Never write .m3u8 files for playlists
+    #[arg(long)]
+    pub no_m3u: bool,
+
+    /// Add playlists (and Liked Songs) to Plex instead of writing .m3u8 files
+    #[arg(
+        long,
+        env = "SPOTDL_PLEX",
+        // so SPOTDL_PLEX takes 1/0, yes/no or on/off, not only true/false
+        value_parser = clap::builder::BoolishValueParser::new(),
+        long_help = "\
+          Add playlists (and Liked Songs) to Plex instead of writing .m3u8 files\n\n\
+          Once a playlist is downloaded, it's added to Plex, in Spotify's order, in the music \
+          library holding the output directory. Downloading the same playlist again (say, \
+          for its new songs) updates it there; it's never added twice. This needs a token \
+          (see --plex-token); without one, the playlist is written as an .m3u8 file after \
+          all. If Plex can't be reached, the songs are downloaded anyway; run spotdl on the \
+          same link again once it's back. SPOTDL_PLEX=1 turns this on for every run."
+    )]
+    pub plex: bool,
+
+    /// The Plex Media Server to add playlists to (with --plex)
+    #[arg(long, value_name = "URL", env = "SPOTDL_PLEX_URL", default_value = plex::DEFAULT_URL)]
+    pub plex_url: String,
+
+    /// Plex token, for --plex [default: the one Plex Media Server keeps on this computer]
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "SPOTDL_PLEX_TOKEN",
+        hide_env_values = true,
+        long_help = "\
+          Plex token, for --plex [default: the one Plex Media Server keeps on this computer]\n\n\
+          When Plex Media Server runs on this computer, its own token is used, so there's \
+          nothing to set up: on macOS it's in its settings, on Linux in its Preferences.xml \
+          (if spotdl may read it), on Windows in the registry. It's the server owner's, so \
+          the playlists are too. The token is never shown or saved."
+    )]
+    pub plex_token: Option<plex::Token>,
 
     /// Download again even if the file already exists
     #[arg(long)]

@@ -1,8 +1,8 @@
 // spotdl's desktop window. The Rust side (src/gui/main.rs) owns all state and logic;
 // this file only lays it out and forwards clicks.
 
-import { ListView, Palette } from "std-widgets.slint";
-import { Theme, ThemeColors, Button, LineEdit, ComboBox, ProgressIndicator, Spinner } from "widgets.slint";
+import { ListView, Palette, ScrollView } from "std-widgets.slint";
+import { Theme, ThemeColors, Button, CheckBox, LineEdit, ComboBox, ProgressIndicator, Spinner } from "widgets.slint";
 
 // for the Rust side, which sets the theme
 export { Theme, ThemeColors }
@@ -300,6 +300,8 @@ export component AppWindow inherits Window {
     // Settings: the themes' names, and which one is showing
     in property <[string]> theme-names;
     in-out property <int> theme-index;
+    // Settings: downloaded playlists go to Plex
+    in-out property <bool> plex-on;
 
     // Slint still draws the scroll bars and menus itself; they go light or dark with the
     // theme rather than with the system
@@ -336,6 +338,8 @@ export component AppWindow inherits Window {
     callback format-changed();
     // a theme was chosen in Settings, by its place in theme-names
     callback theme-changed(int);
+    // Plex was turned on or off in Settings (plex-on says which)
+    callback plex-changed();
     // invoked from Rust when a job ends, so the Rust side can update the results
     callback job-finished(int);
 
@@ -747,171 +751,207 @@ export component AppWindow inherits Window {
 
                 Rectangle {
                     width: min(620px, root.width - 40px);
+                    // all of it when the window has room; otherwise it scrolls
+                    height: min(settings-content.preferred-height, root.height - 40px);
                     border-radius: 10px;
                     border-width: 1px;
                     border-color: Theme.border;
                     background: Theme.background;
+                    clip: true;
 
-                    VerticalLayout {
-                        padding: 22px;
-                        spacing: 12px;
+                    settings-scroll := ScrollView {
+                        content-width: self.visible-width;
+                        content-height: settings-content.preferred-height;
 
-                        HorizontalLayout {
-                            spacing: 8px;
+                        settings-content := VerticalLayout {
+                            width: settings-scroll.visible-width;
+                            padding: 22px;
+                            spacing: 12px;
 
-                            Text {
-                                text: "Settings";
-                                color: Theme.foreground;
-                                font-size: 20px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
+                            HorizontalLayout {
+                                spacing: 8px;
 
-                            Text {
-                                text: "Theme";
-                                color: Theme.muted;
-                                vertical-alignment: center;
-                            }
+                                Text {
+                                    text: "Settings";
+                                    color: Theme.foreground;
+                                    font-size: 20px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
 
-                            ComboBox {
-                                width: 200px;
-                                model: root.theme-names;
-                                current-index <=> root.theme-index;
-                                selected => {
-                                    root.theme-changed(self.current-index);
+                                Text {
+                                    text: "Theme";
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                }
+
+                                ComboBox {
+                                    width: 200px;
+                                    model: root.theme-names;
+                                    current-index <=> root.theme-index;
+                                    selected => {
+                                        root.theme-changed(self.current-index);
+                                    }
                                 }
                             }
-                        }
 
-                        Text {
-                            text: "Search albums, artists and playlists";
-                            color: Theme.foreground;
-                            font-size: 15px;
-                            font-weight: 600;
-                        }
-
-                        Text {
-                            text: "Out of the box, search finds songs, and the albums and artists they're on. To search albums, artists and playlists directly, spotdl needs a Spotify developer app of your own. It's free and takes a couple of minutes:";
-                            color: Theme.muted;
-                            wrap: word-wrap;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 10px;
                             Text {
-                                text: "1. Open Spotify's developer dashboard, and log in with your Spotify account if it asks.";
+                                text: "Playlists in Plex";
+                                color: Theme.foreground;
+                                font-size: 15px;
+                                font-weight: 600;
+                            }
+
+                            HorizontalLayout {
+                                CheckBox {
+                                    text: "Add downloaded playlists to Plex";
+                                    checked <=> root.plex-on;
+                                    toggled => {
+                                        root.plex-changed();
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            Text {
+                                text: "Each playlist (and Liked Songs) goes into Plex in Spotify's order, instead of into an .m3u8 file, and downloading it again brings it up to date there. This needs Plex Media Server on this computer, with a music library that has the download folder in it.";
+                                color: Theme.muted;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: "Search albums, artists and playlists";
+                                color: Theme.foreground;
+                                font-size: 15px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: "Out of the box, search finds songs, and the albums and artists they're on. To search albums, artists and playlists directly, spotdl needs a Spotify developer app of your own. It's free and takes a couple of minutes:";
+                                color: Theme.muted;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: "1. Open Spotify's developer dashboard, and log in with your Spotify account if it asks.";
+                                    color: Theme.foreground;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Button {
+                                        text: "Open the dashboard";
+                                        clicked => {
+                                            root.open-developer-dashboard();
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "2. Choose Create app. Any name and description will do. For the redirect URI, enter http://127.0.0.1:8888/callback (spotdl doesn't use it). Tick Web API, accept the terms, and save.";
                                 color: Theme.foreground;
                                 wrap: word-wrap;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
                             }
 
-                            VerticalLayout {
-                                alignment: center;
-                                Button {
-                                    text: "Open the dashboard";
-                                    clicked => {
-                                        root.open-developer-dashboard();
+                            Text {
+                                text: "3. In the app's settings, copy its Client ID and its Client secret (under View client secret) into the boxes below.";
+                                color: Theme.foreground;
+                                wrap: word-wrap;
+                            }
+
+                            GridLayout {
+                                spacing: 8px;
+                                Row {
+                                    Text {
+                                        text: "Client ID";
+                                        color: Theme.foreground;
+                                        vertical-alignment: center;
+                                    }
+
+                                    LineEdit {
+                                        text <=> root.app-client-id;
+                                        placeholder-text: "paste the Client ID";
+                                    }
+                                }
+
+                                Row {
+                                    Text {
+                                        text: "Client secret";
+                                        color: Theme.foreground;
+                                        vertical-alignment: center;
+                                    }
+
+                                    LineEdit {
+                                        text <=> root.app-client-secret;
+                                        input-type: password;
+                                        placeholder-text: root.app-saved ? "saved (paste a new one to change it)" : "paste the Client secret";
+                                        accepted => {
+                                            root.save-developer-app();
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        Text {
-                            text: "2. Choose Create app. Any name and description will do. For the redirect URI, enter http://127.0.0.1:8888/callback (spotdl doesn't use it). Tick Web API, accept the terms, and save.";
-                            color: Theme.foreground;
-                            wrap: word-wrap;
-                        }
-
-                        Text {
-                            text: "3. In the app's settings, copy its Client ID and its Client secret (under View client secret) into the boxes below.";
-                            color: Theme.foreground;
-                            wrap: word-wrap;
-                        }
-
-                        GridLayout {
-                            spacing: 8px;
-                            Row {
-                                Text {
-                                    text: "Client ID";
-                                    color: Theme.foreground;
-                                    vertical-alignment: center;
-                                }
-
-                                LineEdit {
-                                    text <=> root.app-client-id;
-                                    placeholder-text: "paste the Client ID";
-                                }
+                            if root.app-status != "": Text {
+                                text: root.app-status;
+                                color: root.app-checking ? Theme.muted : root.app-status-bad ? Theme.bad : Theme.good;
+                                wrap: word-wrap;
                             }
 
-                            Row {
-                                Text {
-                                    text: "Client secret";
-                                    color: Theme.foreground;
-                                    vertical-alignment: center;
+                            if root.app-from-environment: Text {
+                                text: "SPOTDL_CLIENT_ID and SPOTDL_CLIENT_SECRET are set, so when spotdl starts it uses those rather than what's saved here.";
+                                font-size: 12px;
+                                color: Theme.muted;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                if root.app-saved: Button {
+                                    text: "Remove";
+                                    enabled: !root.app-checking;
+                                    clicked => {
+                                        root.remove-developer-app();
+                                    }
                                 }
 
-                                LineEdit {
-                                    text <=> root.app-client-secret;
-                                    input-type: password;
-                                    placeholder-text: root.app-saved ? "saved (paste a new one to change it)" : "paste the Client secret";
-                                    accepted => {
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                if root.app-checking: VerticalLayout {
+                                    alignment: center;
+                                    Spinner {
+                                        width: 20px;
+                                        height: 20px;
+                                    }
+                                }
+
+                                Button {
+                                    text: "Close";
+                                    clicked => {
+                                        root.settings-open = false;
+                                    }
+                                }
+
+                                Button {
+                                    text: "Save";
+                                    primary: true;
+                                    enabled: !root.app-checking;
+                                    clicked => {
                                         root.save-developer-app();
                                     }
-                                }
-                            }
-                        }
-
-                        if root.app-status != "": Text {
-                            text: root.app-status;
-                            color: root.app-checking ? Theme.muted : root.app-status-bad ? Theme.bad : Theme.good;
-                            wrap: word-wrap;
-                        }
-
-                        if root.app-from-environment: Text {
-                            text: "SPOTDL_CLIENT_ID and SPOTDL_CLIENT_SECRET are set, so when spotdl starts it uses those rather than what's saved here.";
-                            font-size: 12px;
-                            color: Theme.muted;
-                            wrap: word-wrap;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-
-                            if root.app-saved: Button {
-                                text: "Remove";
-                                enabled: !root.app-checking;
-                                clicked => {
-                                    root.remove-developer-app();
-                                }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                            }
-
-                            if root.app-checking: VerticalLayout {
-                                alignment: center;
-                                Spinner {
-                                    width: 20px;
-                                    height: 20px;
-                                }
-                            }
-
-                            Button {
-                                text: "Close";
-                                clicked => {
-                                    root.settings-open = false;
-                                }
-                            }
-
-                            Button {
-                                text: "Save";
-                                primary: true;
-                                enabled: !root.app-checking;
-                                clicked => {
-                                    root.save-developer-app();
                                 }
                             }
                         }

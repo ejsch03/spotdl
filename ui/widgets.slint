@@ -135,6 +135,97 @@ export component Button {
     }
 }
 
+// A box to tick, with its label beside it; clicking either one ticks or unticks it.
+export component CheckBox {
+    in property <string> text;
+    in-out property <bool> checked;
+    in property <bool> enabled <=> touch.enabled;
+    out property <bool> has-focus: keys.has-focus;
+
+    // ticked or unticked by the user (`checked` says which)
+    callback toggled();
+
+    min-height: max(24px, layout.min-height);
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    forward-focus: keys;
+    opacity: root.enabled ? 1 : 0.5;
+
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-label: root.text;
+    accessible-action-default => {
+        touch.clicked();
+    }
+
+    layout := HorizontalLayout {
+        spacing: 8px;
+
+        VerticalLayout {
+            alignment: center;
+
+            box := Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border-width: root.checked ? 0px : 1px;
+                border-color: Theme.border;
+                background: root.checked ? (touch.pressed ? Theme.accent-pressed : touch.has-hover ? Theme.accent-hover : Theme.accent) : (touch.pressed ? Theme.control-pressed : touch.has-hover ? Theme.control-hover : Theme.control);
+
+                animate background { duration: 120ms; }
+
+                if root.checked: Path {
+                    width: 12px;
+                    height: 12px;
+                    viewbox-width: 12;
+                    viewbox-height: 12;
+                    commands: "M 2 6.5 L 5 9.5 L 10 3";
+                    stroke: Theme.accent-foreground;
+                    stroke-width: 2px;
+                    fill: transparent;
+                }
+
+                if root.has-focus && root.enabled: FocusRing {
+                    width: parent.width + 6px;
+                    height: parent.height + 6px;
+                    border-radius: 6px;
+                }
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.foreground;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+
+    keys := FocusScope {
+        // only for the keyboard: clicks go to the touch area
+        x: 0;
+        width: 0;
+        enabled <=> root.enabled;
+
+        key-pressed(event) => {
+            if event.text == Key.Space {
+                touch.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
 // The × that empties a text box.
 component ClearButton inherits Rectangle {
     callback clicked();

@@ -1,9 +1,9 @@
 //! The desktop app's settings file, `gui.json` in the config directory. It keeps what's
-//! chosen in the window (the download folder, the format and the theme) for the next
-//! time, e.g.
+//! chosen in the window (the download folder, the format, the theme and whether playlists
+//! go to Plex) for the next time, e.g.
 //!
 //! ```json
-//! { "output": "/home/me/Music", "format": "ogg", "theme": "nord" }
+//! { "output": "/home/me/Music", "format": "ogg", "theme": "nord", "plex": true }
 //! ```
 //!
 //! Other keys in the file are left alone, so it's safe to edit by hand.
@@ -64,6 +64,14 @@ impl Prefs {
         self.values.get("theme").and_then(Value::as_str)
     }
 
+    /// Whether playlists go to Plex; they don't unless that was turned on in Settings.
+    pub fn plex(&self) -> bool {
+        self.values
+            .get("plex")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Remembers the download folder; an empty one means the default again.
     pub fn set_output(&mut self, dir: &str) {
         match dir.trim() {
@@ -81,6 +89,10 @@ impl Prefs {
 
     pub fn set_theme(&mut self, id: &str) {
         self.values.insert("theme".into(), id.into());
+    }
+
+    pub fn set_plex(&mut self, on: bool) {
+        self.values.insert("plex".into(), on.into());
     }
 
     /// Writes the file, replacing the old one in one step so it's never half-written.
@@ -102,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remembers_folder_format_and_theme() {
+    fn remembers_folder_format_theme_and_plex() {
         let dir = std::env::temp_dir().join(format!("spotdl-prefs-{}", std::process::id()));
         _ = std::fs::remove_dir_all(&dir);
 
@@ -112,20 +124,23 @@ mod tests {
             (None, None, None),
             "nothing saved yet"
         );
+        assert!(!prefs.plex(), "Plex is off to begin with");
         prefs.set_output("  ~/Music/Spotify ");
         prefs.set_format(Format::Opus);
         prefs.set_theme("nord");
+        prefs.set_plex(true);
         prefs.save().unwrap();
 
         let prefs = Prefs::load(&dir);
         assert_eq!(prefs.output(), Some("~/Music/Spotify"));
         assert_eq!(prefs.format(), Some(Format::Opus));
         assert_eq!(prefs.theme(), Some("nord"));
+        assert!(prefs.plex());
 
         // keys it doesn't know survive; bad values are ignored
         std::fs::write(
             dir.join(FILE),
-            r#"{ "output": "", "format": "wav", "theme": 3, "window": "maximized" }"#,
+            r#"{ "output": "", "format": "wav", "theme": 3, "plex": "yes", "window": "maximized" }"#,
         )
         .unwrap();
         let mut prefs = Prefs::load(&dir);
@@ -133,6 +148,7 @@ mod tests {
             (prefs.output(), prefs.format(), prefs.theme()),
             (None, None, None)
         );
+        assert!(!prefs.plex());
         prefs.set_format(Format::Flac);
         prefs.save().unwrap();
         let saved = std::fs::read_to_string(dir.join(FILE)).unwrap();

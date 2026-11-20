@@ -290,16 +290,18 @@ fn progress(ids: &[SpotifyId], tracks: &HashMap<SpotifyId, Arc<TrackInfo>>) -> O
     })
 }
 
-/// Like [`collection`], for a playlist. Downloading one also writes its `.m3u8` file
-/// (unless that's turned off), so that has to be there too. Without it the playlist
-/// isn't downloaded, which settles it without loading any track details.
+/// Like [`collection`], for a playlist. When downloading one always writes its `.m3u8`
+/// file (by default, or with `--m3u`), that has to be there too; without it the playlist
+/// isn't downloaded, which settles it without loading any track details. When playlists
+/// go to Plex, the file may rightly be missing (Plex has the playlist instead), so the
+/// tracks are all that count.
 fn playlist(
     p: &PlaylistTracks,
     tracks: &HashMap<SpotifyId, Arc<TrackInfo>>,
     settings: &Settings,
     failed: &HashSet<SpotifyId>,
 ) -> Result<bool, Need> {
-    if settings.m3u && !settings.playlist_file(&p.name).is_file() {
+    if settings.always_writes_m3u() && !settings.playlist_file(&p.name).is_file() {
         return Ok(false);
     }
     collection(&p.tracks, Some(&p.name), tracks, settings, failed)
@@ -355,6 +357,7 @@ fn collection(
 mod tests {
     use super::*;
     use crate::cli::{Bitrate, Format};
+    use crate::engine::M3u;
     use crate::meta::{AlbumInfo, Playable};
     use crate::output::Template;
     use std::path::Path;
@@ -371,7 +374,8 @@ mod tests {
             template: Template::parse("{album}/{track} - {title}").unwrap(),
             playlist_template: Template::parse("{playlist}/{playlist_index} {title}").unwrap(),
             releases: vec![],
-            m3u: false,
+            m3u: M3u::Auto,
+            plex: None,
             overwrite: false,
             dry_run: false,
             delay: Duration::ZERO,
@@ -480,31 +484,43 @@ mod tests {
         touch(&dir.join("Chill/03 Song 3.ogg"));
         assert_eq!(check(&ids, Some("Chill"), &tracks, &s), Ok(true));
 
-        // and with playlist files on, the playlist's .m3u8 has to be there too
-        let mut with_m3u = s.clone();
-        with_m3u.m3u = true;
+        // When a playlist goes to Plex, or with --no-m3u, its tracks are all that count...
         let chill = PlaylistTracks {
             name: "Chill: Vol. 2".into(),
             tracks: ids.clone(),
             loaded: Instant::now(),
         };
         let none = HashSet::new();
-        assert!(matches!(
-            playlist(&chill, &tracks, &with_m3u, &none),
-            Ok(false)
-        ));
-        // (and nothing has to be loaded to tell)
-        assert!(matches!(
-            playlist(&chill, &HashMap::new(), &with_m3u, &none),
-            Ok(false)
-        ));
-        touch(&dir.join("Chill - Vol. 2.m3u8"));
+        let mut plex = s.clone();
+        plex.plex = Some(crate::plex::Config::new(crate::plex::DEFAULT_URL, None).unwrap());
+        assert!(matches!(playlist(&chill, &tracks, &plex, &none), Ok(false)));
         touch(&dir.join("Chill - Vol. 2/01 Song 1.ogg"));
         touch(&dir.join("Chill - Vol. 2/03 Song 3.ogg"));
-        assert!(matches!(
-            playlist(&chill, &tracks, &with_m3u, &none),
-            Ok(true)
-        ));
+        assert!(matches!(playlist(&chill, &tracks, &plex, &none), Ok(true)));
+        let mut never = s.clone();
+        never.m3u = M3u::Never;
+        assert!(matches!(playlist(&chill, &tracks, &never, &none), Ok(true)));
+        // ...but by default, and with --m3u even with Plex, its .m3u8 has to be there too
+        let mut always = plex.clone();
+        always.m3u = M3u::Always;
+        for settings in [&s, &always] {
+            assert!(matches!(
+                playlist(&chill, &tracks, settings, &none),
+                Ok(false)
+            ));
+            // (and nothing has to be loaded to tell)
+            assert!(matches!(
+                playlist(&chill, &HashMap::new(), settings, &none),
+                Ok(false)
+            ));
+        }
+        touch(&dir.join("Chill - Vol. 2.m3u8"));
+        for settings in [&s, &always] {
+            assert!(matches!(
+                playlist(&chill, &tracks, settings, &none),
+                Ok(true)
+            ));
+        }
         _ = std::fs::remove_dir_all(&dir);
     }
 

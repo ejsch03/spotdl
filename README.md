@@ -17,6 +17,8 @@ Album · samurai champloo music record departure — Nujabes, fat jon · 2004 ·
 - Tags title, artists, album, album artist, track/disc numbers, release date, ISRC,
   label, copyright and ReplayGain, and embeds full-resolution cover art.
 - Skips files you already have, so re-running a playlist only fetches what's new.
+- Writes an `.m3u8` file for each downloaded playlist, or, if you turn it on, adds it to
+  Plex in Spotify's order and keeps it up to date there.
 
 ## Setup
 
@@ -149,20 +151,64 @@ library can be copied to any drive.
 
 Playlists (and Liked Songs) are filed under their albums like everything else, so every
 song is stored once: a song that's in several playlists, or that you already have from an
-album, is skipped instead of downloaded again, which also saves an audio key request. Each
-playlist is written as `<playlist>.m3u8` in the output directory, listing its songs in order
-with paths relative to it, so it keeps working if the drive is mounted somewhere else. Most
-players and music servers (VLC, foobar2000, MusicBee, Plex, Jellyfin, Navidrome, ...) read
-these.
+album, is skipped instead of downloaded again, which also saves an audio key request. The
+playlist itself goes into an `.m3u8` file, or to Plex (see [Playlists](#playlists)).
 
 For a folder per playlist instead, use `--playlist-template '{playlist}/{artist} - {title}'`.
-`--no-m3u` skips the `.m3u8` files.
+
+### Playlists
+
+Once a playlist (or Liked Songs) is downloaded, spotdl writes `<playlist>.m3u8` into the
+output directory. It lists the playlist's songs in order with paths relative to the file,
+so it keeps working if the drive is mounted somewhere else, and most players and music
+servers (VLC, foobar2000, MusicBee, Jellyfin, Navidrome, ...) read it. `--no-m3u` turns it
+off.
+
+#### Plex
+
+With `--plex` (or `SPOTDL_PLEX=1`), spotdl adds the playlist to Plex instead, in Spotify's
+order. Downloading the same playlist again later, say for its new songs, updates it there
+in place; it's never added twice. When Plex Media Server runs on the same computer,
+there's nothing else to set up: spotdl uses the token Plex keeps for itself (on macOS in
+its settings, on Linux in its `Preferences.xml` if spotdl may read it, on Windows in the
+registry), so the playlists belong to the server's owner, just as if they'd been made in
+Plex. In the desktop app, turn on **Add downloaded playlists to Plex** in Settings.
+
+- The playlist goes into the music library whose folder holds the output directory. spotdl
+  has Plex scan the library first, then matches each song by its file, so new downloads
+  are in the playlist right away. If no music library holds the output directory, the
+  playlist is written as an `.m3u8` file instead.
+- Spotify's order wins: each update replaces what's in the playlist in Plex. A playlist
+  that already has exactly those songs is left alone. Smart playlists are never touched.
+- A song that's in a playlist twice is in Plex's once (Plex can't hold a track twice).
+- Problems with Plex never stop a download. If Plex isn't running, or a song isn't in its
+  library, spotdl says so; run it again on the same link to bring the playlist up to date
+  (nothing is downloaded again).
+- A playlist in Plex named the way its `.m3u8` file was (`:)` as `-)`, say) is taken to be
+  that playlist and renamed to its Spotify name.
+
+| Option                   | Environment         | Default                                  |
+|--------------------------|---------------------|------------------------------------------|
+| `--plex`                 | `SPOTDL_PLEX`       | off: playlists are `.m3u8` files         |
+| `--plex-url <URL>`       | `SPOTDL_PLEX_URL`   | `http://127.0.0.1:32400`                 |
+| `--plex-token <TOKEN>`   | `SPOTDL_PLEX_TOKEN` | the one Plex Media Server keeps on this computer |
+
+For a Plex server on another computer, pass its address and a token (see Plex's [Finding
+an authentication token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)).
+The token is never printed or saved.
+
+Plex doesn't read `.m3u8` files inside its libraries, so while Plex has the playlists,
+spotdl writes none. It still writes one when there's no Plex token on the computer, or
+when no Plex music library holds the output directory. `--m3u` writes it always, whatever
+happens with Plex; `--no-m3u` never.
 
 ### Defaults via environment
 
 Set `SPOTDL_OUTPUT`, `SPOTDL_FORMAT`, `SPOTDL_BITRATE`, `SPOTDL_TEMPLATE`,
-`SPOTDL_PLAYLIST_TEMPLATE`, `SPOTDL_DELAY` or `SPOTDL_CONFIG_DIR` to change the defaults,
-for example `export SPOTDL_OUTPUT=~/Music SPOTDL_FORMAT=mp3`.
+`SPOTDL_PLAYLIST_TEMPLATE`, `SPOTDL_DELAY`, `SPOTDL_PLEX`, `SPOTDL_PLEX_URL`,
+`SPOTDL_PLEX_TOKEN` or
+`SPOTDL_CONFIG_DIR` to change the defaults, for example
+`export SPOTDL_OUTPUT=~/Music SPOTDL_FORMAT=mp3`.
 
 ## Desktop app
 
@@ -217,9 +263,16 @@ theme that comes in a light and a dark version starts in whichever matches the s
 light or dark mode at the time; switching the system's mode while the app is open leaves
 the window as it is.
 
+In **Settings**, **Add downloaded playlists to Plex** (off by default) sends playlists to
+Plex instead of `.m3u8` files (see [Plex](#plex)), from the next download on. It's kept in
+`gui.json` (`"plex": true`); passing `--plex` or setting `SPOTDL_PLEX` overrides it for
+that run.
+
 Songs, albums and playlists that are already in the download folder, in the chosen format,
 show a greyed-out **Downloaded** button, since downloading them again would do nothing. (A
-playlist counts once all its songs and its `.m3u8` file are there.)
+playlist counts once all its songs are there, and its `.m3u8` file too unless playlists go
+to Plex. To bring a playlist up to date in Plex anyway, paste its link into the search
+box.)
 Telling takes their track details (metadata, never audio keys): usually one or two lookups
 per result, kept for the session, so switching folder or format only re-checks the disk.
 Artists, and playlists of more than 300 tracks, aren't checked.
@@ -293,7 +346,8 @@ music on an external drive:
   (⌘H), and click its Dock icon to come back.
 - **Environment variables** set in your shell profile (`SPOTDL_*`) don't reach the app when
   it's started from the Dock or Launchpad. The window remembers its folder and format
-  anyway, and the developer app is best set up in Settings.
+  anyway, the developer app is best set up in Settings, and Plex on the same Mac only needs
+  turning on there (see [Plex](#plex)).
 - **Over SSH**, macOS may refuse remote sessions access to external drives. Turning on
   "Allow full disk access for remote users" (System Settings → General → Sharing → the ⓘ
   next to Remote Login) fixes that.

@@ -69,6 +69,9 @@ slint = { version = "1.19.0", optional = true, default-features = false, feature
     "renderer-software",
 ] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "process", "io-util", "fs", "signal", "sync", "time"] }
+# matching downloaded files with Plex's tracks: the same name can be spelled with composed
+# or decomposed accents
+unicode-normalization = "0.1"
 
 # librespot-core's build script breaks with newer vergen releases; keep these pinned.
 # (cargo reports vergen-gitcl as unused: it's only here to constrain the version.)

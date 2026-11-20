@@ -12,7 +12,9 @@ use librespot_core::Session;
 
 use crate::auth::{self, Auth, Connection};
 use crate::cli::{Cli, Command, DownloadArgs};
-use crate::engine::{self, Downloader, Event, Pos, Reporter, Settings, Stats, TrackState, count};
+use crate::engine::{
+    self, Downloader, Event, PlexEvent, Pos, Reporter, Settings, Stats, TrackState, count,
+};
 use crate::input;
 use crate::login::{self, BrowserLogin};
 use crate::meta::Meta;
@@ -227,6 +229,9 @@ fn summary(s: &Stats, halted: bool, dry_run: bool, output: &Path, elapsed: Durat
     if s.not_attempted > 0 {
         parts.push(format!("{} not attempted", count(s.not_attempted, "track")));
     }
+    if s.plex_synced > 0 {
+        parts.push(format!("{} in Plex", count(s.plex_synced, "playlist")));
+    }
     if s.inputs_not_started > 0 {
         parts.push(format!(
             "{} not started",
@@ -268,6 +273,9 @@ fn summary(s: &Stats, halted: bool, dry_run: bool, output: &Path, elapsed: Durat
         ExitCode::FAILURE
     }
 }
+
+/// The most tracks missing from a playlist in Plex to list one by one.
+const UNMATCHED_SHOWN: usize = 10;
 
 /// Renders engine events in the terminal: finished lines scroll up, with at most one
 /// live spinner or progress bar underneath.
@@ -389,6 +397,39 @@ impl Terminal {
             }
         }
     }
+
+    fn plex(&mut self, event: PlexEvent<'_>) {
+        self.clear();
+        match event {
+            PlexEvent::WouldSync { title } => {
+                ui().println(ui::dim(&format!(
+                    "The playlist “{title}” would be updated in Plex"
+                )));
+            }
+            PlexEvent::NoLibrary { folder } => {
+                let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.into());
+                ui().println(ui::dim(&format!(
+                    "Plex has no music library with {} in it, so the playlist isn't in Plex",
+                    folder.display()
+                )));
+            }
+            PlexEvent::Synced(synced) => {
+                ui().println(ui::ok(&synced.summary()));
+                if let Some(text) = synced.left_out() {
+                    ui().println(ui::warn(&text));
+                    for path in synced.unmatched.iter().take(UNMATCHED_SHOWN) {
+                        ui().println(ui::dim(&format!("    {path}")));
+                    }
+                    if let Some(more) = synced.unmatched.len().checked_sub(UNMATCHED_SHOWN)
+                        && more > 0
+                    {
+                        ui().println(ui::dim(&format!("    and {more} more")));
+                    }
+                }
+            }
+            PlexEvent::Failed(text) => ui().println(ui::warn(text)),
+        }
+    }
 }
 
 impl Reporter for Terminal {
@@ -416,6 +457,7 @@ impl Reporter for Terminal {
             Event::WrotePlaylist(path) => {
                 ui().println(ui::ok(&format!("Wrote playlist {}", path.display())));
             }
+            Event::Plex(event) => self.plex(event),
             Event::Track { pos, label, state } => self.track(pos, label, state),
         }
     }
